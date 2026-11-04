@@ -875,6 +875,8 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["status", "reported"],
+          "if": { "properties": { "status": { "const": "merged" } } },
+          "then": { "required": ["model"] },
           "properties": {
             "status": { "enum": ["merged", "failed", "interrupted"] },
             "reported": { "type": "integer", "minimum": 2 },

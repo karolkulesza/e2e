@@ -334,5 +334,7 @@ describe('ExploreRecord', () => {
     assertValidExplore({ ...single, steps: singleSteps, findings: singleFindings });
     expect(() => assertValidExplore({ ...single, steps: singleSteps, findings: singleFindings, merge: { status: 'failed', reported: 2 } })).toThrow();
     expect(() => assertValidExplore({ ...single, findings: singleFindings })).toThrow();
+    expect(() => assertValidExplore({ ...valid, merge: { status: 'merged', reported: 2 } })).toThrow();
+    assertValidExplore({ ...valid, merge: { status: 'failed', reported: 2 } });
   });
 });
