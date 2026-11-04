@@ -624,7 +624,9 @@
           "path": "/issues",
           "reportedAt": "2026-07-24T12:00:30.000Z",
           "explorer": 1,
-          "merged": ["018f0f5c-7b2a-7abc-8abc-0123456789f2"]
+          "merged": [
+            { "id": "018f0f5c-7b2a-7abc-8abc-0123456789f2", "title": "Count shows 0 issues", "explorer": 2, "step": 1 }
+          ]
         }
       ],
       "explorers": [

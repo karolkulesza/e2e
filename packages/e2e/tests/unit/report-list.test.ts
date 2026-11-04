@@ -2117,17 +2117,21 @@ describe('explore runs', () => {
     const tagged = (explorer: number | undefined, progress: Extract<RunEventFact, { type: 'explore' }>['progress']): RunEventFact => ({ type: 'explore', progress, ...(explorer === undefined ? {} : { explorer }) });
     const budgets = { maxSteps: 4, timeoutMs: 300_000 };
     reporter.handle(runStarted({ targets: ['web'] }));
-    reporter.handle(plan([{ file: 'explore/1', target: 'web', tests: 1 }, { file: 'explore/2', target: 'web', tests: 1 }]));
+    reporter.handle(plan([1, 2, 3].map((index) => ({ file: `explore/${String(index)}`, target: 'web', tests: 1 }))));
     reporter.handle(testStarted('t1', GOAL, 'web', 'explore/1'));
     reporter.handle(testStarted('t2', GOAL, 'web', 'explore/2'));
-    reporter.handle(tagged(1, { phase: 'started', goal: GOAL, budgets, focus: 'core flows' }));
-    reporter.handle(tagged(2, { phase: 'started', goal: GOAL, budgets, focus: 'edge-case input' }));
+    reporter.handle(tagged(1, { phase: 'started', goal: GOAL, budgets, focus: 'core flows', explorers: 3 }));
     reporter.handle(tagged(1, { phase: 'step-started', step: STEP_1 }));
+    // Explorers that have not started yet still count: the run is not over, and their budget is in the total.
+    expect(frames.at(-1)).toContain('Steps  0 done of 12 · 1 explorer running · 2 waiting');
+    reporter.handle(tagged(2, { phase: 'started', goal: GOAL, budgets, focus: 'edge-case input', explorers: 3 }));
+    reporter.handle(tagged(3, { phase: 'started', goal: GOAL, budgets, focus: 'state across screens', explorers: 3 }));
+    reporter.handle(tagged(3, { phase: 'finished', ended: 'stuck' }));
     reporter.handle(tagged(2, { phase: 'planning', closing: false }));
     expect(frames.at(-1)).toContain('[1] core flows 0 of 4 steps done');
     expect(frames.at(-1)).toContain('↳ 1  Cart (step 1 of 4)');
     expect(frames.at(-1)).toContain('[2] edge-case input 0 of 4 steps done');
-    expect(frames.at(-1)).toContain('Steps  0 done of 8 · 2 explorers running');
+    expect(frames.at(-1)).toContain('Steps  0 done of 12 · 2 explorers running');
     reporter.handle(tagged(1, { phase: 'finding', finding: FINDING }));
     reporter.handle(tagged(1, { phase: 'step-finished', step: { ...STEP_1, status: 'passed', startedAt: '2026-09-11T10:00:01.000Z', durationMs: 32_000 } }));
     reporter.handle(tagged(2, { phase: 'step-started', step: STEP_1 }));
@@ -2135,7 +2139,7 @@ describe('explore runs', () => {
     reporter.handle(tagged(2, { phase: 'step-finished', step: { ...STEP_1, status: 'exhausted', summary: 'Ran out of actions', startedAt: '2026-09-11T10:00:01.000Z', durationMs: 240_000 } }));
     reporter.handle(tagged(1, { phase: 'finished', ended: 'finished', summary: 'Checkout cannot be completed.' }));
     reporter.handle(tagged(2, { phase: 'finished', ended: 'step-limit', summary: 'Long names break the cart.' }));
-    reporter.handle(tagged(undefined, { phase: 'merged', reported: 2, findings: [{ ...FINDING, explorer: 1, merged: ['f-dup'] }] }));
+    reporter.handle(tagged(undefined, { phase: 'merged', reported: 2, findings: [{ ...FINDING, explorer: 1, merged: [{ id: 'f-dup', title: FINDING.title, explorer: 2, step: 1 }] }] }));
     for (const id of ['t1', 't2']) {
       reporter.handle(finished(result({ status: 'failed', id, file: id === 't1' ? 'explore/1' : 'explore/2', title: [GOAL], target: 'web', attempts: [attempt({ status: 'failed', error: { category: 'test', code: 'ASSERTION_FAILED', message: 'exploration found 1 issue(s)', retryable: false } })] })));
     }
@@ -2151,7 +2155,7 @@ describe('explore runs', () => {
     expect(text).toContain('Assessment [1] core flows');
     expect(text).toContain('Checkout cannot be completed.');
     expect(text).toContain('Assessment [2] edge-case input');
-    expect(text).toContain('Steps  2 of 8 · 1 passed · 1 ended at their limit · 2 explorers');
+    expect(text).toContain('Steps  2 of 12 · 1 passed · 1 ended at their limit · 3 explorers');
     expect(text).not.toContain('Failed Tests');
   });
 

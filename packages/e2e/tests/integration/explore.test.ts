@@ -177,7 +177,10 @@ describe('e2e explore', () => {
     expect(record.steps.map((step) => [step.explorer, step.index])).toEqual([[1, 1], [2, 1]]);
     // Both explorers reported the counter: the merge keeps one, naming the other.
     expect(record.findings).toHaveLength(1);
-    expect(record.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, explorer: 1, merged: [expect.any(String)] });
+    // The absorbed finding keeps its explorer, step, and screenshot, which is an artifact of explorer 2's test.
+    expect(record.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, explorer: 1, merged: [{ title: COUNTER_FINDING.title, explorer: 2, step: 1 }] });
+    const absorbed = record.findings[0]!.merged![0]!;
+    expect(outcome.report.run.results[1]!.attempts[0]!.artifacts.find((artifact) => artifact.id === absorbed.artifactId)).toMatchObject({ kind: 'screenshot' });
     expect(record.merge).toMatchObject({ status: 'merged', reported: 2 });
     expect(outcome.report.run.usage.modelTokens).toBeGreaterThanOrEqual(record.merge!.modelTokens!);
     const tags = events.flatMap((event) => (event.type === 'explore' ? [[event.explorer, event.progress.phase]] : []));
@@ -681,7 +684,7 @@ export default {
     expect(started.toSorted()).toEqual([[1, 'core flows'], [2, 'edge-case input']]);
     expect(outcome.explore.steps.map((step) => step.explorer).toSorted()).toEqual([1, 2]);
     expect(outcome.explore.findings).toHaveLength(1);
-    expect(outcome.explore.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, merged: [expect.any(String)] });
+    expect(outcome.explore.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, merged: [{ id: expect.any(String), title: COUNTER_FINDING.title }] });
     expect(outcome.explore.merge).toMatchObject({ status: 'merged', reported: 2 });
     // The evidence screenshot the worker kept is an artifact of its explorer's test.
     const finding = outcome.explore.findings[0]!;

@@ -9,7 +9,7 @@
 import { z } from 'zod';
 import type { ModelAdapter, ModelUsage } from '../agent/model/adapter.ts';
 import { deriveJsonSchema } from '../agent/model/schema.ts';
-import type { ReportExploreFinding } from '../report/build.ts';
+import type { ReportExploreFinding, ReportMergedFinding } from '../report/build.ts';
 import type { ProviderOptions } from '../types.ts';
 
 /** The merge call's deadline: one small structured call, on a slow provider. */
@@ -69,7 +69,7 @@ export async function mergeFindings(findings: readonly ReportExploreFinding[], s
 /**
  * One finding per group, in the order each group was first reported: the
  * most detailed report, graded as the gravest of its group so a merge never
- * lowers a defect, with the ids of the others in `merged`. An index out of
+ * lowers a defect, with the others in `merged`. An index out of
  * range or already grouped is ignored; one no group names stays on its own.
  */
 export function applyGroups(findings: readonly ReportExploreFinding[], groups: readonly (readonly number[])[]): ReportExploreFinding[] {
@@ -89,9 +89,11 @@ export function applyGroups(findings: readonly ReportExploreFinding[], groups: r
     .map((group, position) => {
       const kept = group.reduce((best, index) => (detail(findings[index]!) > detail(findings[best]!) ? index : best));
       const all = group.map((index) => findings[index]!);
-      const others = group.filter((index) => index !== kept).map((index) => findings[index]!.id);
+      const others = group.filter((index) => index !== kept).map((index) => absorbed(findings[index]!));
       const issue = all.some((finding) => finding.kind === 'issue');
-      const severity = Math.max(...all.filter((finding) => !issue || finding.kind === 'issue').map((finding) => finding.severity)) as ReportExploreFinding['severity'];
+      const severity = all
+        .filter((finding) => !issue || finding.kind === 'issue')
+        .reduce<ReportExploreFinding['severity']>((gravest, finding) => (finding.severity > gravest ? finding.severity : gravest), 1);
       return {
         ...findings[kept]!,
         index: position,
@@ -100,6 +102,17 @@ export function applyGroups(findings: readonly ReportExploreFinding[], groups: r
         ...(others.length === 0 ? {} : { merged: others }),
       };
     });
+}
+
+/** What the report keeps of a finding merged into another. */
+function absorbed(finding: ReportExploreFinding): ReportMergedFinding {
+  return {
+    id: finding.id,
+    title: finding.title,
+    ...(finding.explorer === undefined ? {} : { explorer: finding.explorer }),
+    ...(finding.step === undefined ? {} : { step: finding.step }),
+    ...(finding.artifactId === undefined ? {} : { artifactId: finding.artifactId }),
+  };
 }
 
 /** How much a report tells: the characters of what it expected, saw, and did. */

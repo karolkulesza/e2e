@@ -17,8 +17,17 @@ export interface ExploreBudgets {
 export type OpenedStep = Pick<ReportExploreStep, 'index' | 'title' | 'instruction'>;
 
 export type ExploreProgress =
-  /** The exploration begins: its test has started and the app is about to open. `focus` labels a parallel explorer's focus. */
-  | { readonly phase: 'started'; readonly goal: string; readonly budgets: ExploreBudgets; readonly focus?: string | undefined }
+  /**
+   * The exploration begins: its test has started and the app is about to
+   * open. A parallel explorer adds its focus label and how many explorers run.
+   */
+  | {
+      readonly phase: 'started';
+      readonly goal: string;
+      readonly budgets: ExploreBudgets;
+      readonly focus?: string | undefined;
+      readonly explorers?: number | undefined;
+    }
   /** The planner is deciding the next charter, or (`closing`) the assessment that ends the run. */
   | { readonly phase: 'planning'; readonly closing: boolean }
   | { readonly phase: 'step-started'; readonly step: OpenedStep }

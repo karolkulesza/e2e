@@ -174,7 +174,7 @@ record `report.run.explore` also holds.
 | `explore.summary` | The agent's closing assessment, when it gave one. |
 | `explore.steps` | Each step the agent planned and ran, with its status: `passed`, `failed`, `blocked`, or `exhausted`. |
 | `explore.findings` | Each finding: `kind`, `severity` from 1 to 5, `title`, `expected`, `actual`, and `reproduction`. An `issue` fails the run; a `warning` does not. |
-| `explore.explorers`, `explore.merge` | With `parallel` above 1: each explorer's `focus`, `ended`, and `summary`, and the merge of their findings. Steps and findings name their `explorer`; a merged finding lists the ids it absorbed in `merged`. |
+| `explore.explorers`, `explore.merge` | With `parallel` above 1: each explorer's `focus`, `ended`, and `summary`, and the merge of their findings. Steps and findings name their `explorer`; a merged finding lists the findings it absorbed in `merged`, each with its `id`, `title`, `explorer`, `step`, and `artifactId`. |
 
 Once the exploration starts, findings, failures, and interruption resolve
 with their status in the report. Options or a config that cannot start one

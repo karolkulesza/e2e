@@ -773,7 +773,7 @@ if (runEvent.type === 'explore') {
   if (runEvent.progress.phase === 'finding') runEvent.progress.finding.severity satisfies 1 | 2 | 3 | 4 | 5;
   // Parallel explorers tag their moments with the explorer, one-based; the merge carries the merged findings.
   runEvent.explorer satisfies number | undefined;
-  if (runEvent.progress.phase === 'merged') runEvent.progress.findings[0]?.merged satisfies readonly string[] | undefined;
+  if (runEvent.progress.phase === 'merged') runEvent.progress.findings[0]?.merged?.[0]?.id satisfies string | undefined;
 }
 // A parallel exploration's record: each finding and step names its explorer, and the explorers their focus.
 report.run.explore?.findings[0]?.explorer satisfies number | undefined;

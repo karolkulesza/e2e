@@ -104,6 +104,8 @@ export class ExploreView {
   private readonly artifacts: ArtifactRecord[] = [];
   /** High-water mark of the live rows; the window pads up to it. */
   private reservedRows = RESERVED_ROWS;
+  /** How many explorers run, as the first parallel explorer to start announced; 1 for a single exploration. */
+  private explorers = 1;
 
   constructor(
     private readonly pc: Colors,
@@ -117,7 +119,7 @@ export class ExploreView {
 
   /** Whether several explorers report into the view. */
   get parallel(): boolean {
-    return [...this.lanes.keys()].some((explorer) => explorer > 1) || this.lanes.get(1)?.focus !== undefined;
+    return this.explorers > 1;
   }
 
   private lane(explorer: number): Lane {
@@ -145,6 +147,7 @@ export class ExploreView {
     switch (progress.phase) {
       case 'started':
         if (progress.focus !== undefined) this.lanes.set(explorer ?? 1, { ...lane, focus: progress.focus });
+        this.explorers = Math.max(this.explorers, progress.explorers ?? 1);
         break;
       case 'planning':
         lane.planning = progress.closing ? 'closing' : 'step';
@@ -189,9 +192,10 @@ export class ExploreView {
     this.artifacts.push(...artifacts);
   }
 
-  /** Whether every explorer is over. */
+  /** Whether every explorer is over, those not started yet included. */
   private get over(): boolean {
-    return this.lanes.size > 0 && [...this.lanes.values()].every((lane) => lane.ended !== undefined);
+    const ended = [...this.lanes.values()].filter((lane) => lane.ended !== undefined).length;
+    return ended >= this.explorers;
   }
 
   /** `[2] ` before a parallel explorer's rows; nothing with one explorer. */
@@ -369,13 +373,14 @@ export class ExploreView {
           ].join(pc.dim(' | '));
     const lanes = this.ordered().map(([, lane]) => lane);
     const done = lanes.reduce((total, lane) => total + lane.steps.length, 0);
-    const budget = this.budgets.maxSteps * Math.max(1, lanes.length);
+    const budget = this.budgets.maxSteps * this.explorers;
     const steps: string[] = [];
     if (!this.over) {
       steps.push(`${done} done of ${budget}`);
       if (this.parallel) {
         const running = lanes.filter((lane) => lane.ended === undefined).length;
-        steps.push(`${running} explorer${running === 1 ? '' : 's'} running`);
+        const waiting = this.explorers - lanes.length;
+        steps.push(`${running} explorer${running === 1 ? '' : 's'} running`, ...(waiting > 0 ? [`${waiting} waiting`] : []));
       } else {
         const lane = lanes[0];
         if (lane?.open !== undefined) steps.push(`step ${lane.open.step.index} running`);
@@ -383,7 +388,7 @@ export class ExploreView {
         else if (lane?.planning === 'step') steps.push('planning');
       }
     } else {
-      const ended = this.parallel ? `${String(lanes.length)} explorers` : ENDED_TEXT[lanes[0]!.ended!];
+      const ended = this.parallel ? `${String(this.explorers)} explorers` : ENDED_TEXT[lanes[0]!.ended!];
       steps.push(`${done} of ${budget}`, ...this.outcomeParts(lanes), pc.dim(ended));
     }
     return [padTitle(pc, 'Findings') + findings, padTitle(pc, 'Steps') + steps.join(pc.dim(' · '))];

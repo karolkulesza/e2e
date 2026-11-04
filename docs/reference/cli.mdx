@@ -887,7 +887,7 @@ flag, or write `--trace=<mode>` or `--video=<mode>`.
   assessment, the steps, and the findings.
   With `--parallel`, it also holds `explorers` (each one's focus, ending, and
   assessment), each step and finding names its `explorer`, a merged finding
-  lists the ids it absorbed in `merged`, and `merge` records the merge call:
+  lists the findings it absorbed in `merged` (`id`, `title`, `explorer`, `step`, `artifactId`), and `merge` records the merge call:
   `merged`, or `failed` when the call did not answer and every finding was
   kept. `ended` is then the least complete ending of the explorers.
 - Artifacts go to a directory named from the goal's first words and a digest

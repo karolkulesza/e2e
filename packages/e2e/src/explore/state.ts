@@ -2,7 +2,7 @@
  * The record of one exploration: the goal, its budgets, the steps the agent
  * planned and ran, and the findings it reported. One instance is shared by
  * the planner, the explorer's finding tool, the exploration body, and the
- * run's event spine, and its snapshot becomes `run.explore` in the report.
+ * run's event spine; the runner records it as `run.explore` (`ExploreRecord`).
  * The state is the report boundary: every free text is bounded to the
  * schema's ceilings here, and nowhere else. Each change is announced to the
  * listeners `subscribe` registered, as `ExploreProgress`.
@@ -46,6 +46,8 @@ export class ExploreState {
     private readonly now: () => number = Date.now,
     /** A parallel explorer's focus; undefined when the exploration runs one explorer. */
     readonly focus?: ExploreFocus,
+    /** How many explorers the exploration runs, this one included. */
+    readonly explorers = 1,
   ) {}
 
   /** Why exploration stopped; `aborted` until `end` says otherwise. */
@@ -73,7 +75,7 @@ export class ExploreState {
       phase: 'started',
       goal: this.goal,
       budgets: { maxSteps: this.budgets.maxSteps, timeoutMs: this.budgets.timeoutMs },
-      ...(this.focus === undefined ? {} : { focus: this.focus.label }),
+      ...(this.focus === undefined ? {} : { focus: this.focus.label, explorers: this.explorers }),
     });
   }
 
@@ -167,17 +169,6 @@ export class ExploreState {
       count += 1;
     }
     return count;
-  }
-
-  snapshot(): ReportExplore {
-    return {
-      goal: this.goal,
-      budgets: { maxSteps: this.budgets.maxSteps, timeoutMs: this.budgets.timeoutMs },
-      ended: this.#ended,
-      ...(this.#summary === undefined ? {} : { summary: this.#summary }),
-      steps: [...this.steps],
-      findings: [...this.findings],
-    };
   }
 }
 

@@ -114,7 +114,7 @@ describe('applyGroups', () => {
     const other = finding({ title: 'Sort ignores direction' });
     const merged = applyGroups([terse, other, detailed], [[2, 0], [1]]);
     expect(merged).toEqual([
-      { ...detailed, index: 0, kind: 'issue', severity: 3, merged: [terse.id] },
+      { ...detailed, index: 0, kind: 'issue', severity: 3, merged: [{ id: terse.id, title: terse.title, step: 1 }] },
       { ...other, index: 1, kind: 'issue', severity: 3 },
     ]);
   });
@@ -151,7 +151,7 @@ describe('mergeFindings', () => {
     expect(calls[0]!.prompt).toContain('"index":2');
     expect(calls[0]!.prompt).toContain('"path":"/issues"');
     expect(calls[0]!.validate({ groups: 'all' }).ok).toBe(false);
-    expect(result.findings.map((entry) => entry.merged)).toEqual([[findings[0]!.id], undefined]);
+    expect(result.findings.map((entry) => entry.merged?.map((absorbed) => absorbed.id))).toEqual([[findings[0]!.id], undefined]);
     expect(result.usage.inputTokens).toBe(300);
   });
 });
@@ -169,7 +169,7 @@ describe('ExploreRecord', () => {
     state.endStep('passed', 'Created');
     state.end('finished', 'Done.');
     await record.settle(scope());
-    expect(record.snapshot()).toEqual(state.snapshot());
+    expect(record.snapshot()).toEqual({ goal: 'Explore the tracker', budgets: BUDGETS, ended: 'finished', summary: 'Done.', steps: state.steps, findings: state.findings });
     expect(heard.every((explorer) => explorer === undefined)).toBe(true);
   });
 
@@ -211,7 +211,7 @@ describe('ExploreRecord', () => {
     await record.settle(scope());
     expect(asked[0]!.map((entry) => [entry.id, entry.explorer, entry.index])).toEqual([[first.id, 1, 0], [second.id, 2, 1]]);
     const snapshot = record.snapshot();
-    expect(snapshot.findings).toEqual([{ ...first, explorer: 1, index: 0, merged: [second.id] }]);
+    expect(snapshot.findings).toEqual([{ ...first, explorer: 1, index: 0, merged: [{ id: second.id, title: second.title, explorer: 2, step: 1 }] }]);
     expect(snapshot.merge).toEqual({ status: 'merged', reported: 2, modelTokens: 430, estimatedCostUsd: 0.002 });
     expect(announced).toEqual([{ phase: 'merged', reported: 2, findings: snapshot.findings }]);
     assertValidExplore(snapshot);

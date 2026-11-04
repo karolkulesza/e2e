@@ -159,8 +159,17 @@ export interface ReportExploreFinding {
   artifactId?: string | undefined;
   /** The parallel explorer that reported it, one-based (`explorers[].index`); absent with one explorer. */
   explorer?: number | undefined;
-  /** The ids of the findings merged into this one as the same failure; absent when none was. */
-  merged?: readonly string[] | undefined;
+  /** The findings merged into this one as the same failure; absent when none was. */
+  merged?: readonly ReportMergedFinding[] | undefined;
+}
+
+/** A finding merged into another as the same failure: enough to find its explorer, step, and screenshot. */
+export interface ReportMergedFinding {
+  id: string;
+  title: string;
+  explorer?: number | undefined;
+  step?: number | undefined;
+  artifactId?: string | undefined;
 }
 
 /** One exploration step: a charter the agent planned and then executed as an `agent.act` step. */

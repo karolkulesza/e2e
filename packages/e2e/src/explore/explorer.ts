@@ -80,7 +80,7 @@ export function explorerFile(spec: ExploreSpec, index: number): string {
  */
 export function buildExplorer(spec: ExploreSpec, index: number, sources: ExplorerSources, notice: (message: string) => void): Explorer {
   const focus = spec.focuses[index - 1];
-  const state = new ExploreState(spec.goal, spec.budgets, Date.now, focus);
+  const state = new ExploreState(spec.goal, spec.budgets, Date.now, focus, explorerCount(spec));
   const { agentName } = spec;
   const explorer = explorerAgent({ state, agentName, entry: sources.entry, resolved: sources.config.agent, notice });
   const resolved = resolveAgentConfig(exploreAgentConfig(explorer), `agents.${agentName}`);

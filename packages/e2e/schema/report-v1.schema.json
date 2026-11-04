@@ -799,8 +799,19 @@
         "merged": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 },
-          "description": "The ids of the findings merged into this one as the same failure."
+          "description": "The findings merged into this one as the same failure: their id, title, explorer, step, and evidence screenshot.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "explorer": { "type": "integer", "minimum": 1 },
+              "step": { "type": "integer", "minimum": 1 },
+              "artifactId": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     },

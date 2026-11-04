@@ -86,7 +86,7 @@ says so and the rest wait. With a config value instead of a file
 
 After the run, one model call merges findings that describe the same failure
 (the same symptom on the same kind of screen with other data); the kept
-finding is the most detailed and lists the others' ids in `merged`. If the
+finding is the most detailed and lists the others in `merged`. If the
 call fails, every finding is kept and a notice says so.
 
 ## Flags
@@ -141,7 +141,8 @@ medium 3, low 2, trivial 1. `.e2e/report.json` has the record under
 
 With `--parallel`, the record adds `explorers` (`index`, `focus`, `ended`,
 `summary`) and `merge` (`status: merged | failed`, `reported`), each step and
-finding has `explorer`, a merged finding has `merged` (ids), the top-level
+finding has `explorer`, a merged finding has `merged` (`id`, `title`,
+`explorer`, `step`, `artifactId` of each absorbed finding), the top-level
 `summary` is absent, and `ended` is the least complete explorer's.
 
 A step carries `errorCode` only when it did not pass; a finding carries
