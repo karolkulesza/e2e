@@ -10,6 +10,7 @@
 
 import { timestamp, uuidv7 } from '../internal/ids.ts';
 import type { ReportExplore, ReportExploreFinding, ReportExploreStep } from '../report/build.ts';
+import type { ExploreFocus } from './focus.ts';
 import type { ExploreBudgets, ExploreListener, ExploreProgress, OpenedStep } from './progress.ts';
 
 export type { ExploreBudgets, OpenedStep } from './progress.ts';
@@ -43,6 +44,8 @@ export class ExploreState {
     readonly goal: string,
     readonly budgets: ExploreBudgets,
     private readonly now: () => number = Date.now,
+    /** A parallel explorer's focus; undefined when the exploration runs one explorer. */
+    readonly focus?: ExploreFocus,
   ) {}
 
   /** Why exploration stopped; `aborted` until `end` says otherwise. */
@@ -66,7 +69,12 @@ export class ExploreState {
 
   /** Announces the exploration beginning: the goal and its budgets. */
   start(): void {
-    this.#notify({ phase: 'started', goal: this.goal, budgets: { maxSteps: this.budgets.maxSteps, timeoutMs: this.budgets.timeoutMs } });
+    this.#notify({
+      phase: 'started',
+      goal: this.goal,
+      budgets: { maxSteps: this.budgets.maxSteps, timeoutMs: this.budgets.timeoutMs },
+      ...(this.focus === undefined ? {} : { focus: this.focus.label }),
+    });
   }
 
   /** Announces that the planner is deciding what comes next: a step, or the closing assessment. */

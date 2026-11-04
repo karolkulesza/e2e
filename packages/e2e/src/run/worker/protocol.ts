@@ -8,6 +8,8 @@
  */
 
 import type { TestIdentity } from '../../collect/collect.ts';
+import type { ExploreSpec } from '../../explore/explorer.ts';
+import type { ExploreProgress } from '../../explore/progress.ts';
 import type { ResolvedTestOptions, SkipInfo } from '../../collect/select.ts';
 import type { CliOverrides, PortAssignments, ResolvedTarget } from '../../config/resolve.ts';
 import type { AiTraceSnapshot } from '../../internal/ai-trace.ts';
@@ -72,6 +74,12 @@ export interface WorkerBootstrap {
   readonly debug: boolean;
   /** Whether the worker should record model calls for `--ai-trace`. */
   readonly aiTrace: boolean;
+  /**
+   * The exploration whose explorers this worker may run (`e2e explore
+   * --parallel`): a unit of an explorer's virtual file runs the explorer the
+   * worker builds from this spec.
+   */
+  readonly explore?: ExploreSpec | undefined;
 }
 
 export interface RunUnitMessage {
@@ -303,6 +311,14 @@ export interface ShutdownDoneMessage {
   readonly aiTrace?: AiTraceSnapshot;
 }
 
+/** One moment of an explorer this worker runs; the runner records the exploration from these. */
+export interface ExploreMessage {
+  readonly type: 'explore';
+  /** One-based. */
+  readonly explorer: number;
+  readonly progress: ExploreProgress;
+}
+
 export interface FatalMessage {
   readonly type: 'fatal';
   readonly error: SerializedError;
@@ -336,7 +352,8 @@ export type WorkerToMain =
   | UnitDoneMessage
   | ShutdownDoneMessage
   | FatalMessage
-  | RunAbortMessage;
+  | RunAbortMessage
+  | ExploreMessage;
 
 /** Reattaches the scheduler's resolved target to a wire result. */
 export function decodeResult(wire: WireResultRecord, target: ResolvedTarget): ResultRecord {

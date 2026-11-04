@@ -60,6 +60,7 @@ import {
   type ModelTally,
 } from './format.ts';
 import { leftOutTests } from './left-out.ts';
+import { explorerOfFile } from '../explore/progress.ts';
 import { ExploreView } from './list-explore.ts';
 import { isShownEvent, type ConfiguredModel, type FileGroup, type ReplayNotice, type RunningTest, type TestLine } from './list-model.ts';
 import { replayLine, replayNotices, stepLine } from './list-steps.ts';
@@ -421,7 +422,7 @@ export class ListReporter implements Reporter {
         this.serialGroup(event.group);
         break;
       case 'explore':
-        this.exploreProgress(event.progress);
+        this.exploreProgress(event.progress, event.explorer);
         break;
       case 'run-error':
         this.errors.push(event.error);
@@ -692,7 +693,7 @@ export class ListReporter implements Reporter {
       }
       case 'event': {
         const { current } = running;
-        this.explore?.action(progress.event);
+        this.explore?.action(progress.event, explorerOfFile(running.group.file));
         if (current === undefined) break;
         // The event ends whatever was announced; until the next announcement
         // the model has the turn.
@@ -1049,7 +1050,8 @@ export class ListReporter implements Reporter {
   private renderWindow(room: number): string[] {
     const running = [...this.pairs.values()].filter((test) => test.executing);
     if (this.explore !== undefined) {
-      return this.explore.liveRows(this.exploreBadge(), running[0]?.current?.events, this.summaryRows(false), Date.now(), room);
+      const eventsOf = (explorer: number) => running.find((test) => (explorerOfFile(test.group.file) ?? 1) === explorer)?.current?.events;
+      return this.explore.liveRows(this.exploreBadge(), eventsOf, this.summaryRows(false), Date.now(), room);
     }
     return this.tree.render(running, this.summaryRows(false), Date.now(), room, this.inFlight);
   }
@@ -1070,23 +1072,22 @@ export class ListReporter implements Reporter {
    * finding each print at once without one, and the window shows them with
    * one.
    */
-  private exploreProgress(progress: RunEventOf<'explore'>['progress']): void {
-    if (progress.phase === 'started') {
+  private exploreProgress(progress: RunEventOf<'explore'>['progress'], explorer: number | undefined): void {
+    if (progress.phase === 'started' && this.explore === undefined) {
       this.explore = new ExploreView(this.pc, progress);
       if (!this.live) {
         this.print(this.explore.header(this.exploreBadge(), 'Exploring'));
       }
-      this.window.redraw();
-      return;
     }
     const view = this.explore;
     if (view === undefined) return;
-    view.progress(progress);
+    view.progress(progress, explorer);
     if (!this.live) {
-      if (progress.phase === 'step-finished' && view.lastStep !== undefined) {
-        for (const line of view.stepLines(view.lastStep)) this.print(line);
+      const last = view.lastStep(explorer);
+      if (progress.phase === 'step-finished' && last !== undefined) {
+        for (const line of view.stepLines(last, undefined, explorer)) this.print(line);
       } else if (progress.phase === 'finding') {
-        this.print(view.findingLine(progress.finding));
+        this.print(view.findingLine(progress.finding, undefined, explorer));
       }
     }
     this.window.redraw();

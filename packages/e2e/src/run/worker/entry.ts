@@ -9,7 +9,8 @@ import { collectFromRegistration } from '../../collect/collect.ts';
 import { collectModule } from '../../collect/registry.ts';
 import type { TestTargetPair } from '../../collect/select.ts';
 import { importModule, loadConfigModule } from '../../config/load.ts';
-import { assignPorts, resolveConfig } from '../../config/resolve.ts';
+import { assignPorts, resolveConfig, type ResolvedConfig } from '../../config/resolve.ts';
+import { workerExplorers } from '../../explore/explorer.ts';
 import { setSecretRegistry } from '../../secrets.ts';
 import { loadAiSdk } from '../../agent/ai-sdk.ts';
 import { AiTraceRecorder, registerAiTraceRecorder } from '../../internal/ai-trace.ts';
@@ -146,6 +147,7 @@ async function bootstrap(
   message: WorkerBootstrap,
   debug: DebugTrace,
   aiTrace: AiTraceRecorder | undefined,
+  emit: (message: WorkerToMain) => void,
 ): Promise<TargetWorkerDeps> {
   // Registered before the config loads: a config module may construct an
   // executor that imports the AI SDK itself, and the integration list is
@@ -153,11 +155,11 @@ async function bootstrap(
   if (aiTrace !== undefined) await registerAiTraceRecorder(aiTrace, loadAiSdk);
   // What the config's top-level code prints is held until its secrets are
   // registered, so it is redacted like a test's output.
-  const { config, target } = await configLoad.during(
+  const { config, target, raw } = await configLoad.during(
     async () => {
-      const raw = await loadConfigModule(message.configPath);
+      const loaded = await loadConfigModule(message.configPath);
       const resolved = assignPorts(
-        resolveConfig(raw, { projectRoot: message.projectRoot, configPath: message.configPath, env: process.env, cli: message.cli }),
+        resolveConfig(loaded, { projectRoot: message.projectRoot, configPath: message.configPath, env: process.env, cli: message.cli }),
         message.ports,
       );
       if (resolved.configDigest !== message.configDigest) {
@@ -172,20 +174,33 @@ async function bootstrap(
       }
       setSecretRegistry(resolved);
       registerStaticSecrets(resolved.allSecrets);
-      return { config: resolved, target: named };
+      return { config: resolved, target: named, raw: loaded };
     },
     (stream, chunk) => process[stream].write(chunk),
     (line) => process.stderr.write(`e2e: [warning] ${line}\n`),
   );
 
+  // An explorer's unit has no file to import: the worker builds the explorer
+  // from the spec, relays its progress, and runs its test as the explorer.
+  const inMemory = new Map<string, { readonly agents: ResolvedConfig['agents'] }>();
+  const explorers =
+    message.explore === undefined
+      ? undefined
+      : workerExplorers(message.explore, { entry: raw.agents?.[message.explore.agentName], config }, (explorer, progress) =>
+          emit({ type: 'explore', explorer, progress }),
+        );
   let collectCounter = 0;
   const resolvePairs = async (unit: RunUnitMessage): Promise<ResolvedUnitPairs> => {
     collectCounter += 1;
-    const registration = await collectModule(
-      () => importModule(unit.absolutePath, `worker-collect-${collectCounter}`),
-      unit.absolutePath,
-      staticSecretLedger(config.allSecrets).redact,
-    );
+    const explorer = explorers?.(unit.file);
+    if (explorer !== undefined) inMemory.set(unit.file, { agents: explorer.agents });
+    const registration =
+      explorer?.registration ??
+      (await collectModule(
+        () => importModule(unit.absolutePath, `worker-collect-${collectCounter}`),
+        unit.absolutePath,
+        staticSecretLedger(config.allSecrets).redact,
+      ));
     const collected = collectFromRegistration(config.projectRoot, unit.absolutePath, registration);
     const byId = new Map(collected.tests.map((test) => [test.id, test]));
     const pairs: TestTargetPair[] = [];
@@ -218,6 +233,7 @@ async function bootstrap(
     isolated: true,
     resolvePairs,
     debug,
+    inMemory,
   };
 }
 
@@ -285,7 +301,7 @@ function main(): void {
       };
       worker = new TargetWorker(
         { emit, fatal, finished: () => exitAfterFlush(0) },
-        () => bootstrap(message.bootstrap, debug, aiTrace),
+        () => bootstrap(message.bootstrap, debug, aiTrace, emit),
       );
       worker.start();
       return;

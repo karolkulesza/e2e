@@ -121,20 +121,19 @@ export interface TargetExecutorOptions {
   readonly interruptSignal: AbortSignal;
   readonly debug?: DebugTrace;
   readonly events?: ExecutionEvents;
-  /** The virtual file of tests registered in memory, and the agents they run as; see `InMemoryAttempts`. */
+  /** The virtual files of tests registered in memory, and the agents they run as; see `InMemoryAttempts`. */
   readonly inMemory?: InMemoryAttempts | undefined;
 }
 
 /**
  * How the attempts of tests registered in memory (`e2e explore`) differ from
- * the rest of the run: they run as `agents` in place of the config's, when
- * given, and with the trace cache off, since nothing replays a test that has
- * no source. The setup tests they need run with the config's own.
+ * the rest of the run, by virtual file: they run as the file's `agents` in
+ * place of the config's, when given, and with the trace cache off, since
+ * nothing replays a test that has no source. The setup tests they need run
+ * with the config's own. A worker process adds the file of each unit it
+ * builds in memory before running it.
  */
-export interface InMemoryAttempts {
-  readonly file: string;
-  readonly agents?: ResolvedConfig['agents'] | undefined;
-}
+export type InMemoryAttempts = ReadonlyMap<string, { readonly agents?: ResolvedConfig['agents'] | undefined }>;
 
 type AttemptPhase = 'launch' | 'beforeEach' | 'body' | 'afterEach';
 
@@ -974,7 +973,7 @@ export class TargetExecutor implements SerialHost {
       }).catch(() => undefined);
       if (evidence !== undefined) record.failure = evidence;
     };
-    const inMemory = this.options.inMemory?.file === pair.test.file ? this.options.inMemory : undefined;
+    const inMemory = this.options.inMemory?.get(pair.test.file);
     const cache =
       inMemory === undefined
         ? createAgentCacheContext({

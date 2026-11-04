@@ -53,7 +53,7 @@ export interface TargetWorkerDeps {
   readonly isolated: boolean;
   readonly resolvePairs: ResolveUnitPairs;
   readonly debug?: DebugTrace;
-  /** See `TargetExecutorOptions.inMemory`; only an in-process worker has tests registered in memory. */
+  /** See `TargetExecutorOptions.inMemory`; a worker process fills it as it builds an explorer's unit. */
   readonly inMemory?: InMemoryAttempts | undefined;
 }
 

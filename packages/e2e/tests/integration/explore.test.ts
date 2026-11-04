@@ -43,10 +43,16 @@ type PlanAnswer = { decision: 'step'; title: string; instruction: string } | { d
 function installExploreModel(options: {
   plan: (call: FakeCall) => PlanAnswer;
   loop: (call: LoopCall) => readonly LoopToolCall[];
+  /** The merge of parallel explorers' findings: `{ groups }`. */
+  merge?: (call: FakeCall) => unknown;
 }): ModelInstance {
   const loop = installFakeLoopModel(options.loop) as ModelInstance & { doGenerate: (request: unknown) => Promise<unknown> };
   // Strict providers want every planner field present; the scripts name only the ones they use.
-  const single = installFakeModel((call) => extracted({ title: '', instruction: '', summary: '', ...options.plan(call) })) as ModelInstance & { doGenerate: (request: unknown) => Promise<unknown> };
+  const single = installFakeModel((call) =>
+    call.schemaName === 'explore-merge'
+      ? (options.merge?.(call) ?? { groups: [] })
+      : extracted({ title: '', instruction: '', summary: '', ...options.plan(call) }),
+  ) as ModelInstance & { doGenerate: (request: unknown) => Promise<unknown> };
   return {
     ...single,
     provider: 'fake',
@@ -71,7 +77,7 @@ async function runExplore(
   app: FixtureApp,
   model: ModelInstance,
   options: Partial<ExploreOptions> = {},
-): Promise<ExploreOutcome> {
+): Promise<ExploreOutcome & { readonly notices: readonly string[] }> {
   const notices: string[] = [];
   const outcome = await explore({
     cwd: project.dir,
@@ -131,6 +137,76 @@ describe('e2e explore', () => {
     expect(new Set(paths).size).toBe(2);
     expect(paths.map((entry) => entry!.split('/').at(-1)).toSorted()).toEqual(['finding-1.png', 'finding-2.png']);
   });
+
+  it('runs parallel explorers from a config value one after another, each with its focus, and merges the same finding', async () => {
+    const planPrompts: string[] = [];
+    const model = installExploreModel({
+      plan: (call) => {
+        planPrompts.push(call.instruction);
+        return call.instruction.includes('(none yet')
+          ? { decision: 'step', title: 'Counter', instruction: 'Look at the counter' }
+          : { decision: 'finish', summary: 'One defect on the home page.' };
+      },
+      loop: (call) =>
+        call.turn % 2 === 1
+          ? [{ toolName: FINDING_TOOL_NAME, input: COUNTER_FINDING }]
+          : [{ toolName: 'complete_step', input: { status: 'passed', summary: 'Looked' } }],
+      merge: () => ({ groups: [[0, 1]] }),
+    });
+    const events: RunEvent[] = [];
+    const outcome = await runExplore(project, app, model, { parallel: 2, maxSteps: 1, onEvent: (event) => { events.push(event); } });
+
+    expect(outcome.report.run.errors).toEqual([]);
+    assertValidReport(outcome.report);
+    expect(outcome.notices).toContain('the config is a value, not a file, so the 2 explorers run one after another in this process');
+    // One test per explorer, each in its own virtual file, both with the goal as the title.
+    expect(outcome.report.run.results.map((result) => [result.file, result.titlePath])).toEqual([
+      ['explore/1', ['Explore the home page and find bugs']],
+      ['explore/2', ['Explore the home page and find bugs']],
+    ]);
+    // The planner and the explorer of each read its own focus.
+    expect(planPrompts.filter((prompt) => prompt.includes('Focus: the core flows end to end'))).toHaveLength(2);
+    expect(planPrompts.filter((prompt) => prompt.includes('Focus: edge-case input and validation'))).toHaveLength(2);
+    expect(loopCalls.some((call) => call.system.includes('Focus: edge-case input and validation'))).toBe(true);
+    const record = outcome.explore;
+    expect(record).toEqual(outcome.report.run.explore);
+    expect(record.explorers).toEqual([
+      { index: 1, focus: 'core flows', ended: 'step-limit', summary: 'One defect on the home page.' },
+      { index: 2, focus: 'edge-case input', ended: 'step-limit', summary: 'One defect on the home page.' },
+    ]);
+    expect(record.steps.map((step) => [step.explorer, step.index])).toEqual([[1, 1], [2, 1]]);
+    // Both explorers reported the counter: the merge keeps one, naming the other.
+    expect(record.findings).toHaveLength(1);
+    expect(record.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, explorer: 1, merged: [expect.any(String)] });
+    expect(record.merge).toMatchObject({ status: 'merged', reported: 2 });
+    expect(outcome.report.run.usage.modelTokens).toBeGreaterThanOrEqual(record.merge!.modelTokens!);
+    const tags = events.flatMap((event) => (event.type === 'explore' ? [[event.explorer, event.progress.phase]] : []));
+    expect(tags).toContainEqual([1, 'started']);
+    expect(tags).toContainEqual([2, 'finding']);
+    expect(tags.at(-1)).toEqual([undefined, 'merged']);
+  }, 120_000);
+
+  it('keeps every finding of parallel explorers when the merge does not answer', async () => {
+    const model = installExploreModel({
+      plan: (call) =>
+        call.instruction.includes('(none yet')
+          ? { decision: 'step', title: 'Counter', instruction: 'Look at the counter' }
+          : { decision: 'finish', summary: 'One defect on the home page.' },
+      loop: (call) =>
+        call.turn % 2 === 1
+          ? [{ toolName: FINDING_TOOL_NAME, input: COUNTER_FINDING }]
+          : [{ toolName: 'complete_step', input: { status: 'passed', summary: 'Looked' } }],
+      merge: () => ({ groups: 'all of them' }),
+    });
+    const outcome = await runExplore(project, app, model, { parallel: 2, maxSteps: 1 });
+
+    expect(outcome.explore.findings.map((finding) => finding.explorer)).toEqual([1, 2]);
+    expect(outcome.explore.merge).toEqual({ status: 'failed', reported: 2 });
+    expect(outcome.report.run.errors).toEqual([]);
+    expect(outcome.exitCode).toBe(1);
+    assertValidReport(outcome.report);
+    await expect(runExplore(project, app, model, { parallel: 6 })).rejects.toMatchObject({ code: 'INVALID_CONFIG', message: 'parallel must be an integer from 1 through 5, got 6' });
+  }, 120_000);
 
   it('keeps its own timeout and ignores the config\'s maxDuration', async () => {
     const model = installExploreModel({
@@ -522,6 +598,96 @@ describe('e2e explore', () => {
       explore({ cwd: project.dir, rawConfig: { targets: [{ name: 'web', engine: web(), app: { url: app.url } }] as never, credentials } }),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG', message: expect.stringContaining('400 account(s) serialize to') });
   });
+});
+
+describe('e2e explore --parallel with a config file', () => {
+  /**
+   * A model the config file builds itself, so each worker process has it:
+   * the planner plans one step then finishes, each explorer step reports the
+   * counter finding then completes, and the merge groups every finding.
+   */
+  const configSource = (url: string) => `import { web } from '@e2e-dev/web';
+const finding = ${JSON.stringify(COUNTER_FINDING)};
+let calls = 0;
+const usage = { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 20, text: 20, reasoning: 0 }, totalTokens: 120 };
+const answer = (content, reason) => ({ content, finishReason: { unified: reason, raw: reason }, usage, warnings: [] });
+const text = (value) => answer([{ type: 'text', text: JSON.stringify(value) }], 'stop');
+const tool = (toolName, input) => answer([{ type: 'tool-call', toolCallId: 'call-' + (calls += 1), toolName, input: JSON.stringify(input) }], 'tool-calls');
+const model = {
+  specificationVersion: 'v4',
+  provider: 'fake',
+  modelId: 'scripted-parallel',
+  supportedUrls: {},
+  async doStream() { throw new Error('scripted models do not stream'); },
+  async doGenerate(request) {
+    const prompt = JSON.stringify(request.prompt);
+    if (request.tools?.some((entry) => entry.name === 'complete_step')) {
+      return request.prompt.some((message) => message.role === 'tool')
+        ? tool('complete_step', { status: 'passed', summary: 'Looked' })
+        : tool('report_finding', finding);
+    }
+    if (request.responseFormat?.name === 'explore-merge') return text({ groups: [[0, 1]] });
+    return text({
+      found: true,
+      missing: null,
+      value: prompt.includes('(none yet')
+        ? { decision: 'step', title: 'Counter', instruction: 'Look at the counter', summary: '' }
+        : { decision: 'finish', title: '', instruction: '', summary: 'One defect on the home page.' },
+    });
+  },
+};
+export default {
+  targets: [{ name: 'web', engine: web(), app: { url: ${JSON.stringify(url)} } }],
+  agents: { default: { model } },
+  actionTimeout: 10_000,
+};
+`;
+  let app: FixtureApp;
+  let project: FixtureProject;
+
+  beforeAll(async () => {
+    app = await startFixtureApp();
+    project = createProject({ 'e2e.config.ts': configSource(app.url) });
+  });
+
+  afterAll(async () => {
+    project?.cleanup();
+    await app?.close();
+  });
+
+  it('runs each explorer in a worker process of its own, relays its progress, and merges the findings', async () => {
+    const events: RunEvent[] = [];
+    const notices: string[] = [];
+    const outcome = await exploreBuilt({
+      cwd: project.dir,
+      goal: 'Explore the home page and find bugs',
+      parallel: 2,
+      maxSteps: 1,
+      timeoutMs: 180_000,
+      quiet: true,
+      notice: (message) => notices.push(message),
+      onEvent: (event) => { events.push(event); },
+    });
+
+    expect(outcome.report.run.errors).toEqual([]);
+    assertValidReport(outcome.report);
+    expect(notices).toEqual([]);
+    expect(outcome.report.run.results.map((result) => [result.file, result.status])).toEqual([
+      ['explore/1', 'failed'],
+      ['explore/2', 'failed'],
+    ]);
+    // Each worker built its explorer with its own focus and relayed every moment.
+    const started = events.flatMap((event) => (event.type === 'explore' && event.progress.phase === 'started' ? [[event.explorer, event.progress.focus]] : []));
+    expect(started.toSorted()).toEqual([[1, 'core flows'], [2, 'edge-case input']]);
+    expect(outcome.explore.steps.map((step) => step.explorer).toSorted()).toEqual([1, 2]);
+    expect(outcome.explore.findings).toHaveLength(1);
+    expect(outcome.explore.findings[0]).toMatchObject({ title: COUNTER_FINDING.title, merged: [expect.any(String)] });
+    expect(outcome.explore.merge).toMatchObject({ status: 'merged', reported: 2 });
+    // The evidence screenshot the worker kept is an artifact of its explorer's test.
+    const finding = outcome.explore.findings[0]!;
+    const result = outcome.report.run.results.find((entry) => entry.file === `explore/${String(finding.explorer)}`)!;
+    expect(result.attempts[0]!.artifacts.find((artifact) => artifact.id === finding.artifactId)).toMatchObject({ kind: 'screenshot' });
+  }, 180_000);
 });
 
 describe('e2e explore --session', () => {

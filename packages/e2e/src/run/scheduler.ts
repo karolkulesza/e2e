@@ -8,6 +8,7 @@
  * execution.
  */
 
+import type { ExploreProgress } from '../explore/progress.ts';
 import type { SkipInfo, TestTargetPair } from '../collect/select.ts';
 import type { ResolvedTarget } from '../config/resolve.ts';
 import type { AiTraceSnapshot } from '../internal/ai-trace.ts';
@@ -69,6 +70,8 @@ export interface SchedulerEvents {
   onOutput?(output: Omit<OutputMessage, 'type'>, targetName: string): void;
   /** One line a worker's engine `init` reported. */
   onNotice?(message: string, targetName: string): void;
+  /** One moment of an explorer a worker runs; `explorer` is one-based. */
+  onExplore?(explorer: number, progress: ExploreProgress): void;
   /** Phase timings a child-process worker drained after one unit. */
   onDebug?(snapshot: DebugSnapshot): void;
   /** Model calls a child-process worker drained after one unit. */
@@ -855,6 +858,10 @@ class Scheduler {
       }
       case 'run-abort': {
         this.options.events.onRunAbort({ error: message.error });
+        break;
+      }
+      case 'explore': {
+        this.options.events.onExplore?.(message.explorer, message.progress);
         break;
       }
     }

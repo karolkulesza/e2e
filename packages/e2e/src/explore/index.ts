@@ -9,10 +9,9 @@
  */
 
 import { MAX_PARAMS_BYTES } from '../agent/act-validation.ts';
-import type { ModuleRegistration, RegisteredTest } from '../collect/registry.ts';
+import { createModelAdapter } from '../agent/model/sdk.ts';
 import { selectTargets } from '../collect/select.ts';
 import { discoverConfig, loadConfigModule, missingConfigError } from '../config/load.ts';
-import { missingModelError, resolveAgentConfig } from '../config/agent.ts';
 import { resolveConfig, type ResolvedConfig, type ResolvedCredential, type ResolvedTarget } from '../config/resolve.ts';
 import { launchesPinnedApp } from '../config/targets.ts';
 import { ConfigurationError } from '../internal/errors.ts';
@@ -21,26 +20,20 @@ import type { RunEventSink } from '../run/events.ts';
 import type { RunnerOutput } from '../run/process-output.ts';
 import { run, type RunOutcome } from '../run/runner.ts';
 import { registerStaticSecrets, staticSecretLedger } from '../run/secrecy.ts';
-import type { AgentConfig, BuiltinReporter, E2EConfig, RecordingMode } from '../types.ts';
-import { createExploreBody } from './body.ts';
-import { explorerAgent, withFindingTool } from './executor.ts';
-import { signedInContext, type PlanAccount } from './plan.ts';
-import { ExploreState } from './state.ts';
+import type { BuiltinReporter, E2EConfig, RecordingMode } from '../types.ts';
+import { buildExplorer, explorerCount, type Explorer, type ExploreSpec } from './explorer.ts';
+import { exploreFocuses, PARALLEL_BOUNDS } from './focus.ts';
+import { mergeFindings } from './merge.ts';
+import type { PlanAccount } from './plan.ts';
+import { ExploreRecord } from './record.ts';
 
 const DEFAULT_GOAL = 'Explore the app and find bugs';
 /** Exploration steps per run, at most: the planner finishes earlier once nothing new is reachable. */
 export const STEP_BOUNDS = { min: 1, max: 100, default: 8 } as const;
 /** The run's wall clock in milliseconds: three minutes to two hours. */
 export const TIMEOUT_BOUNDS = { min: 180_000, max: 7_200_000, default: 600_000 } as const;
+export { PARALLEL_BOUNDS } from './focus.ts';
 const MAX_GOAL_CHARS = 2_000;
-/** Each step's action and model-call budget when the config sets none: a charter is longer than a scripted step. */
-const DEFAULT_STEP_BUDGET = 40;
-/** One charter's own deadline; the run's remaining time caps it. */
-const STEP_TIMEOUT_MS = 240_000;
-/** Added to the test timeout so the body's own clock ends the exploration before the attempt's does. */
-const TIMEOUT_GRACE_MS = 60_000;
-/** The virtual file the report and the reporters show for the exploration. */
-const EXPLORE_FILE = 'explore';
 /**
  * Every charter carries every configured account as a step parameter, and
  * step parameters have a size limit. The inventory takes at most a quarter of
@@ -66,6 +59,14 @@ export interface ExploreOptions {
   readonly session?: string | undefined;
   readonly maxSteps?: number | undefined;
   readonly timeoutMs?: number | undefined;
+  /**
+   * Explorers to run at once, each with the whole goal and its own focus
+   * (`--parallel`), 1 through 5; default 1. Each explorer is one test of the
+   * run, in a worker process of its own, and has the step and time budgets
+   * to itself; their findings are merged once all are over. With a config
+   * value (`rawConfig`) they run one after another in this process.
+   */
+  readonly parallel?: number | undefined;
   readonly headed?: boolean | undefined;
   readonly reporters?: readonly BuiltinReporter[] | undefined;
   /** The results directory, `--output`, over the config's `output`. */
@@ -124,16 +125,21 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     maxSteps: resolveBounded(options.maxSteps, STEP_BOUNDS, 'maxSteps'),
     timeoutMs: resolveBounded(options.timeoutMs, TIMEOUT_BOUNDS, 'timeout'),
   };
+  const parallel = resolveBounded(options.parallel, PARALLEL_BOUNDS, 'parallel');
 
   // The config's secrets are known to the process before what its top-level
   // code printed is released, as `run` loads its config.
-  const loadConfig = async (): Promise<{ raw: E2EConfig; projectRoot: string; resolved: ResolvedConfig }> => {
-    const { raw, projectRoot } = await loadRawConfig(options, cwd);
-    const resolved = resolveConfig(raw, { projectRoot, env, cli: options.agent === undefined ? {} : { agents: [options.agent] } });
+  const loadConfig = async (): Promise<LoadedConfig> => {
+    const loaded = await loadRawConfig(options, cwd);
+    const resolved = resolveConfig(loaded.raw, {
+      projectRoot: loaded.projectRoot,
+      env,
+      cli: options.agent === undefined ? {} : { agents: [options.agent] },
+    });
     registerStaticSecrets(resolved.allSecrets);
-    return { raw, projectRoot, resolved };
+    return { ...loaded, resolved };
   };
-  const { raw, projectRoot, resolved } = await (options.processOutput === undefined
+  const { raw, projectRoot, configPath, resolved } = await (options.processOutput === undefined
     ? loadConfig()
     : options.processOutput.withholdDuring(loadConfig));
   const target = pickTarget(resolved.targets, options.target, notice);
@@ -142,19 +148,40 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
   const agentName = resolved.agentNames[0]!;
   if (agentName !== 'default') notice(`exploring with agent "${agentName}"`);
 
-  const state = new ExploreState(redactGoal(goal, resolved.allSecrets), budgets);
-  const explorer = explorerAgent({ state, agentName, entry: raw.agents?.[agentName], resolved: resolved.agent, notice });
-  const resolvedExplorer = resolveAgentConfig(exploreAgentConfig(explorer), `agents.${agentName}`);
-  // Every exploration step calls the model, a custom executor's included,
-  // since the built-in agent replaces it: no model is a failure before
-  // anything starts, not a run-level one once the first step asks.
-  if (resolvedExplorer.model === undefined) {
-    throw missingModelError(agentName, 'explore runs the built-in agent, which requires a model');
+  const spec: ExploreSpec = {
+    goal: redactGoal(goal, resolved.allSecrets),
+    budgets,
+    agentName,
+    accounts,
+    session: options.session,
+    openApp: target.app.base !== undefined || launchesPinnedApp(target),
+    focuses: parallel === 1 ? [] : exploreFocuses(parallel, { otherAccount: accounts.length > 1 && options.session === undefined }),
+  };
+  // Every explorer is built here, so a missing model fails before anything
+  // starts; only the first tells about a replaced executor.
+  const sources = { entry: raw.agents?.[agentName], config: resolved };
+  const explorers: Explorer[] = Array.from({ length: explorerCount(spec) }, (_, position) =>
+    buildExplorer(spec, position + 1, sources, position === 0 ? notice : () => undefined),
+  );
+  const merger = explorers[0]!.resolved;
+  const record = new ExploreRecord(spec, (findings, signal) =>
+    mergeFindings(findings, {
+      adapter: createModelAdapter(merger.model, agentName),
+      maxInputTokens: merger.maxInputTokens,
+      providerOptions: merger.providerOptions,
+      signal,
+    }),
+  );
+  // Parallel explorers run in worker processes of their own, which load the
+  // config file and rebuild their explorer from the spec. A config value
+  // cannot cross into one, so its explorers run here, one after another.
+  const workers = parallel > 1 && configPath !== undefined ? { configPath, count: parallel, explore: spec } : undefined;
+  if (workers === undefined) {
+    for (const explorer of explorers) record.attach(explorer.index, explorer.state);
+    if (parallel > 1) {
+      notice(`the config is a value, not a file, so the ${String(parallel)} explorers run one after another in this process`);
+    }
   }
-  // The explorer replaces the agent for the exploration alone: a setup test
-  // `--session` pulls in runs as the project's own agents, with its cache and
-  // retries. The exploration pins no retries and runs with the cache off.
-  const explorerAgents = new Map(resolved.agents).set(agentName, withFindingTool(resolvedExplorer, state));
   // The exploration is bounded by its own `--timeout`, not `maxDuration`.
   const { maxDuration: _maxDuration, ...runConfig } = raw;
   const outcome = await run({
@@ -163,11 +190,10 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     agent: options.agent,
     env,
     tests: {
-      file: EXPLORE_FILE,
-      registration: exploreRegistration(state, { openApp: target.app.base !== undefined || launchesPinnedApp(target), accounts, session: options.session }),
-      agents: explorerAgents,
-      explore: state,
+      files: explorers.map(({ file, registration, agents }) => ({ file, registration, agents })),
+      explore: record,
       notices: earlyNotices,
+      ...(workers === undefined ? {} : { workers }),
     },
     targetIds: [target.name],
     headed: options.headed,
@@ -183,14 +209,22 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     quiet: options.quiet,
     processOutput: options.processOutput,
   });
-  return { ...outcome, explore: state.snapshot() };
+  return { ...outcome, explore: record.snapshot() };
 }
 
-async function loadRawConfig(options: ExploreOptions, cwd: string): Promise<{ raw: E2EConfig; projectRoot: string }> {
-  if (options.rawConfig !== undefined) return { raw: options.rawConfig, projectRoot: cwd };
+interface LoadedConfig {
+  readonly raw: E2EConfig;
+  readonly projectRoot: string;
+  /** The file the config was loaded from; undefined for a config value. */
+  readonly configPath: string | undefined;
+  readonly resolved: ResolvedConfig;
+}
+
+async function loadRawConfig(options: ExploreOptions, cwd: string): Promise<Omit<LoadedConfig, 'resolved'>> {
+  if (options.rawConfig !== undefined) return { raw: options.rawConfig, projectRoot: cwd, configPath: undefined };
   const discovered = discoverConfig(cwd, options.configPath);
   if (discovered.configPath === undefined) throw missingConfigError(cwd);
-  return { raw: await loadConfigModule(discovered.configPath), projectRoot: discovered.projectRoot };
+  return { raw: await loadConfigModule(discovered.configPath), projectRoot: discovered.projectRoot, configPath: discovered.configPath };
 }
 
 function resolveGoal(goal: string | undefined): string {
@@ -250,18 +284,6 @@ function pickTarget(targets: readonly ResolvedTarget[], requested: string | unde
 }
 
 /**
- * The explorer's agents entry with per-step budgets that default higher than
- * a scripted step's, a charter being longer.
- */
-function exploreAgentConfig(explorer: AgentConfig): AgentConfig {
-  return {
-    ...explorer,
-    maxSteps: explorer.maxSteps ?? DEFAULT_STEP_BUDGET,
-    maxModelCalls: explorer.maxModelCalls ?? DEFAULT_STEP_BUDGET,
-  };
-}
-
-/**
  * The accounts every charter carries, bounded to what a step parameter holds.
  * Measured as the step sees them: the usernames and the secret placeholders
  * the passwords become there.
@@ -282,39 +304,4 @@ function credentialAccounts(credentials: ReadonlyMap<string, ResolvedCredential>
     );
   }
   return accounts;
-}
-
-/**
- * The one-test registration: the goal is the title, the body is the
- * exploration loop. With a session it consumes that session like any test
- * declaring `{ session }`, so the runner runs the setup that saves it first
- * and restores it into the exploration's attempt.
- */
-function exploreRegistration(
-  state: ExploreState,
-  start: { readonly openApp: boolean; readonly accounts: readonly PlanAccount[]; readonly session: string | undefined },
-): ModuleRegistration {
-  const title = state.goal;
-  const { session } = start;
-  const test: RegisteredTest = {
-    kind: 'test',
-    title,
-    titlePath: [title],
-    declarationIndex: 0,
-    options: {
-      timeout: state.budgets.timeoutMs + TIMEOUT_GRACE_MS,
-      retries: 0,
-      // The goal reaches every prompt as the test's title (`Test: <goal>`).
-      ...(session === undefined ? {} : { agentContext: signedInContext(session) }),
-      ...(session === undefined ? {} : { session }),
-    },
-    sessions: [],
-    tags: [],
-    fn: createExploreBody({ state, stepTimeoutMs: STEP_TIMEOUT_MS, ...start }),
-    fixtures: [],
-    group: undefined,
-    mode: 'normal',
-    source: undefined,
-  };
-  return { tests: [test], hooks: [] };
 }

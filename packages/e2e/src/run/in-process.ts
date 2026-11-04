@@ -12,7 +12,7 @@ import type { ResolvedConfig, ResolvedTarget } from '../config/resolve.ts';
 import { isAbandonedRejection } from '../internal/abandoned.ts';
 import { classifyError, ConfigurationError, serializeError } from '../internal/errors.ts';
 import type { DebugTrace } from '../internal/debug.ts';
-import type { InMemoryAttempts } from './execute.ts';
+import type { InMemoryFile } from './runner.ts';
 import type { SessionStore } from './sessions.ts';
 import type { SpawnUnitRunner, UnitRunner, UnitRunnerEvents } from './unit-runner.ts';
 import { pairKey } from './units.ts';
@@ -24,13 +24,13 @@ export interface InProcessRunnerOptions {
   readonly selection: Selection;
   /**
    * The tests supplied in memory (`RunOptions.tests`). There is no file to
-   * re-import, so the unit of their virtual file adopts this registration as
-   * its realm; it is one unit with no retries, so nothing asks for a second
+   * re-import, so the unit of a virtual file adopts its registration as its
+   * realm; each is one unit with no retries, so nothing asks for a second
    * realm of it. The units of real files, a setup test the in-memory tests
    * need, import their file as always. Their attempts run as described by
    * `InMemoryAttempts`.
    */
-  readonly inMemory?: (InMemoryAttempts & { readonly registration: ModuleRegistration }) | undefined;
+  readonly inMemory?: readonly InMemoryFile[] | undefined;
   readonly runId: string;
   readonly artifactsRoot: string;
   /** See `TargetExecutorOptions.rerunDir`. */
@@ -166,6 +166,7 @@ class InProcessRunner implements UnitRunner {
 
   private async bootstrap(): Promise<TargetWorkerDeps> {
     const { config } = this.options;
+    const inMemory = this.options.inMemory ?? [];
     const target = config.targets.find((candidate) => candidate.name === this.targetName);
     if (target === undefined) {
       throw new ConfigurationError('UNKNOWN_TARGET', `unknown target "${this.targetName}"`);
@@ -182,14 +183,9 @@ class InProcessRunner implements UnitRunner {
       env: this.options.envFor(this.targetName),
       isolated: false,
       debug: this.options.debug,
-      inMemory: this.options.inMemory,
+      inMemory: new Map(inMemory.map(({ file, agents }) => [file, { agents }])),
       resolvePairs: (unit) =>
-        resolveFromSelection(
-          this.options.selection,
-          target,
-          unit,
-          this.options.inMemory?.file === unit.file ? this.options.inMemory.registration : undefined,
-        ),
+        resolveFromSelection(this.options.selection, target, unit, inMemory.find(({ file }) => file === unit.file)?.registration),
     };
   }
 }
