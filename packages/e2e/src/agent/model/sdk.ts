@@ -298,7 +298,9 @@ function parseCost(raw: unknown): number | undefined {
 function answerOf(cause: unknown): UsageCarrier | undefined {
   const { NoObjectGeneratedError } = aiSdk();
   const unwrapped = unwrapRetry(cause);
-  return NoObjectGeneratedError.isInstance(unwrapped) && unwrapped.usage !== undefined ? { usage: unwrapped.usage } : undefined;
+  if (!NoObjectGeneratedError.isInstance(unwrapped)) return undefined;
+  // The text bounds the usage from above when the provider reported no token counts.
+  return { usage: unwrapped.usage, text: unwrapped.text };
 }
 
 interface FinishedCall {
