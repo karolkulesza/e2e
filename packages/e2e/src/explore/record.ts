@@ -9,7 +9,7 @@
 import { errorMessage } from '../internal/errors.ts';
 import type { ReportExplore, ReportExploreFinding, ReportExploreMerge, ReportExploreStep } from '../report/build.ts';
 import { explorerCount, explorerOfSpecFile, type ExploreSpec } from './explorer.ts';
-import { applyGroups, validateGroups, type MergeAnswer } from './merge.ts';
+import { applyGroups, MergeCallError, validateGroups, type MergeAnswer } from './merge.ts';
 import type { ExploreProgress } from './progress.ts';
 
 /** Hears every moment of every explorer as the `explore` run event carries it. */
@@ -29,6 +29,7 @@ interface Copy {
 /** Endings from the least complete: the exploration as a whole ended as the first of these any explorer did. */
 const ENDINGS: readonly ReportExplore['ended'][] = ['aborted', 'stuck', 'time', 'step-limit', 'finished'];
 
+/** The exploration's record in the runner's process, its explorers' moments on the run's spine, and the merge of their findings. */
 export class ExploreRecord {
   readonly #copies: Copy[];
   readonly #listeners: ExploreRecordListener[] = [];
@@ -76,6 +77,7 @@ export class ExploreRecord {
     this.#notify(progress, this.parallel ? explorer : undefined);
   }
 
+  /** Passes one moment to every listener, tagged with its explorer when several run. */
   #notify(progress: ExploreProgress, explorer: number | undefined): void {
     for (const listener of this.#listeners) listener({ progress, ...(explorer === undefined ? {} : { explorer }) });
   }
@@ -98,8 +100,12 @@ export class ExploreRecord {
     try {
       answer = await this.requestGroups(reported, scope.signal);
     } catch (cause) {
-      if (scope.signal.aborted) return keepAll({ status: 'interrupted', reported: reported.length });
-      keepAll({ status: 'failed', reported: reported.length });
+      // A call that answered before it failed (an answer outside the schema)
+      // still cost what it reported; that is counted before either fallback.
+      const model = cause instanceof MergeCallError ? cause.usage : undefined;
+      const spent = { reported: reported.length, ...(model === undefined ? {} : { model }) };
+      if (scope.signal.aborted) return keepAll({ status: 'interrupted', ...spent });
+      keepAll({ status: 'failed', ...spent });
       return this.#notMerged(scope, reported.length, cause);
     }
     const accounted = { reported: reported.length, model: answer.usage };
@@ -114,11 +120,13 @@ export class ExploreRecord {
     this.#settled(applyGroups(reported, partition), { status: 'merged', ...accounted });
   }
 
+  /** Records how the merge ended and the findings the report keeps, and announces it as a `merge` moment. */
   #settled(findings: readonly ReportExploreFinding[], merge: ReportExploreMerge): void {
     this.#merged = { findings, merge };
     this.#notify({ phase: 'merge', merge, findings }, undefined);
   }
 
+  /** Tells the run that the findings were kept unmerged, and why. */
   #notMerged(scope: { readonly notice: (message: string) => void }, reported: number, cause: unknown): void {
     scope.notice(`the findings of ${String(this.#copies.length)} explorers could not be merged, so all ${String(reported)} are kept: ${errorMessage(cause)}`);
   }
@@ -130,6 +138,7 @@ export class ExploreRecord {
       .map((finding, index) => ({ ...finding, index }));
   }
 
+  /** The record as `run.explore`: one explorer's as it ran, or every parallel explorer's with the findings once merged. */
   snapshot(): ReportExplore {
     const { goal, budgets } = this.spec;
     const base = { goal, budgets: { maxSteps: budgets.maxSteps, timeoutMs: budgets.timeoutMs } };

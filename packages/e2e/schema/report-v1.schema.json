@@ -904,7 +904,16 @@
                 "items": {
                   "required": [
                     "explorer"
-                  ]
+                  ],
+                  "properties": {
+                    "merged": {
+                      "items": {
+                        "required": [
+                          "explorer"
+                        ]
+                      }
+                    }
+                  }
                 }
               }
             }

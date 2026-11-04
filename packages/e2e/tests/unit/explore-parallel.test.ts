@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelAdapter, ModelCall } from '../../src/agent/model/adapter.ts';
 import { explorerFile, explorerSource, type ExploreSpec } from '../../src/explore/explorer.ts';
 import { exploreFocuses, focusContext } from '../../src/explore/focus.ts';
-import { applyGroups, requestGroups, validateGroups, type MergeAnswer } from '../../src/explore/merge.ts';
+import { applyGroups, MergeCallError, requestGroups, validateGroups, type MergeAnswer } from '../../src/explore/merge.ts';
 import { planInstruction } from '../../src/explore/plan.ts';
 import { explorerOfFile, type ExploreProgress } from '../../src/explore/progress.ts';
 import { ExploreRecord, type RequestGroups } from '../../src/explore/record.ts';
@@ -16,6 +16,8 @@ import type { ReportExploreFinding } from '../../src/report/build.ts';
 import { resolveConfig } from '../../src/config/resolve.ts';
 import type { E2EConfig } from '../../src/types.ts';
 import { installFakeModel } from '../helpers/fake-model.ts';
+import { createScriptedInstance } from '../helpers/scripted-model.ts';
+import { createModelAdapter } from '../../src/agent/model/sdk.ts';
 
 const SCHEMA_PATH = path.resolve(fileURLToPath(import.meta.url), '..', '..', '..', 'schema', 'report-v1.schema.json');
 
@@ -188,6 +190,37 @@ describe('requestGroups', () => {
   });
 });
 
+describe('requestGroups through the model adapter', () => {
+  /** A merge request against `model` through the production adapter. */
+  const request = (model: ReturnType<typeof installFakeModel>, signal = new AbortController().signal) =>
+    requestGroups([finding(), finding({ title: 'B' })], {
+      adapter: createModelAdapter({ provider: model.provider, id: model.modelId, model }),
+      maxInputTokens: 100_000,
+      providerOptions: undefined,
+      signal,
+    });
+
+  it('keeps the usage of an answer outside the schema on the error it throws', async () => {
+    const failure = await request(installFakeModel(() => ({ groups: 'all' }))).catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(MergeCallError);
+    expect((failure as MergeCallError).usage).toMatchObject({ calls: 1, inputTokens: 100, outputTokens: 20 });
+  });
+
+  it('has no usage to keep when the provider honors the abort and rejects', async () => {
+    const controller = new AbortController();
+    const model = createScriptedInstance('fake', 'aborting', (options: { abortSignal?: AbortSignal }) =>
+      new Promise((_, reject) => {
+        options.abortSignal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        controller.abort();
+      }),
+    );
+    const failure = await request(model as ReturnType<typeof installFakeModel>, controller.signal).catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(MergeCallError);
+    expect((failure as MergeCallError).reason).toMatchObject({ code: 'CANCELLED' });
+    expect((failure as MergeCallError).usage).toBeUndefined();
+  });
+});
+
 describe('explorerSource', () => {
   it('builds each explorer afresh, reports its progress as the unit\'s events, and runs its test as the explorer', () => {
     const model = installFakeModel(() => ({}));
@@ -283,6 +316,30 @@ describe('ExploreRecord', () => {
     expect(failing.snapshot().merge).toEqual({ status: 'failed', reported: 2 });
   });
 
+  it('counts the usage a failed call carried, an answer outside the schema, before keeping every finding', async () => {
+    const record = new ExploreRecord(spec(2), () => Promise.reject(new MergeCallError(new Error('provider response did not match the closed response grammar'), MERGE_USAGE)));
+    explorerRun(record, 1, [finding()]);
+    explorerRun(record, 2, [finding()]);
+    const notices: string[] = [];
+    await record.settle(scope(notices));
+    expect(record.snapshot().merge).toEqual({ status: 'failed', reported: 2, model: MERGE_USAGE });
+    expect(record.snapshot().findings).toHaveLength(2);
+    expect(notices).toEqual(['the findings of 2 explorers could not be merged, so all 2 are kept: provider response did not match the closed response grammar']);
+  });
+
+  it('records an interrupted merge with no usage when the cancelled call rejects without an answer', async () => {
+    const controller = new AbortController();
+    const record = new ExploreRecord(spec(2), () => {
+      controller.abort();
+      return Promise.reject(new MergeCallError(new Error('model call cancelled'), undefined));
+    });
+    explorerRun(record, 1, [finding()]);
+    explorerRun(record, 2, [finding()]);
+    await record.settle(scope([], controller.signal));
+    expect(record.snapshot().merge).toEqual({ status: 'interrupted', reported: 2 });
+    expect(record.snapshot().findings).toHaveLength(2);
+  });
+
   it('keeps every finding and the usage when the run is interrupted while the call is pending', async () => {
     const controller = new AbortController();
     let release = (): void => undefined;
@@ -335,6 +392,9 @@ describe('ExploreRecord', () => {
     expect(() => assertValidExplore({ ...single, steps: singleSteps, findings: singleFindings, merge: { status: 'failed', reported: 2 } })).toThrow();
     expect(() => assertValidExplore({ ...single, findings: singleFindings })).toThrow();
     expect(() => assertValidExplore({ ...valid, merge: { status: 'merged', reported: 2 } })).toThrow();
+    const absorbed = { id: valid.findings[1]!.id, title: valid.findings[1]!.title, step: 1 };
+    expect(() => assertValidExplore({ ...valid, findings: [{ ...valid.findings[0], merged: [absorbed] }] })).toThrow();
+    assertValidExplore({ ...valid, findings: [{ ...valid.findings[0], merged: [{ ...absorbed, explorer: 2 }] }] });
     assertValidExplore({ ...valid, merge: { status: 'failed', reported: 2 } });
   });
 });

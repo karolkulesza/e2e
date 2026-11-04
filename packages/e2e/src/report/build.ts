@@ -74,6 +74,9 @@ export function describeTarget(target: ResolvedTarget): TargetProvenance {
   };
 }
 
+/** The fields a run's unit source adds to the report (`UnitSource.report`): an exploration's record. */
+export type UnitReportFields = Pick<BuildReportOptions, 'explore'>;
+
 export interface BuildReportOptions {
   runId: string;
   config: ResolvedConfig | undefined;

@@ -187,9 +187,16 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     agent: options.agent,
     env,
     tests: {
-      source: explorerSource(spec, sources),
-      onUnitEvent: (file, event) => record.relay(file, event as ExploreProgress),
-      explore: record,
+      source: {
+        ...explorerSource(spec, sources),
+        // Every explorer's moments reach the record as its unit's events; the
+        // record puts them on the run's spine as `explore` events, merges the
+        // findings once the run is over, and is the report's `run.explore`.
+        start: (host) => record.subscribe((event) => host.emit({ type: 'explore', ...event })),
+        receive: (file, event) => record.relay(file, event as ExploreProgress),
+        finish: (host) => record.settle(host),
+        report: () => ({ explore: record.snapshot() }),
+      },
       notices: earlyNotices,
       ...(remote === undefined ? {} : { remote }),
     },
@@ -218,6 +225,7 @@ interface LoadedConfig {
   readonly resolved: ResolvedConfig;
 }
 
+/** The config as loaded: the value given, or the file discovered from `cwd`, with the file's path. */
 async function loadRawConfig(options: ExploreOptions, cwd: string): Promise<Omit<LoadedConfig, 'resolved'>> {
   if (options.rawConfig !== undefined) return { raw: options.rawConfig, projectRoot: cwd, configPath: undefined };
   const discovered = discoverConfig(cwd, options.configPath);

@@ -122,6 +122,7 @@ export class ExploreView {
     return this.lanes.size > 1;
   }
 
+  /** Explorer `explorer`'s lane, created with `focus` the first time it is asked for. */
   private lane(explorer: number, focus?: string): Lane {
     let lane = this.lanes.get(explorer);
     if (lane === undefined) {

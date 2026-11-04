@@ -8,7 +8,9 @@
 
 import type { ModuleRegistration } from '../collect/registry.ts';
 import type { ResolvedConfig } from '../config/resolve.ts';
+import type { UnitReportFields } from '../report/build.ts';
 import type { E2EConfig } from '../types.ts';
+import type { RunEventFact } from './events.ts';
 
 /**
  * How a unit built in memory runs its attempts: as `agents` in place of the
@@ -29,11 +31,32 @@ export interface SourcedUnit {
 /** Receives a unit's own events: plain JSON data, delivered to the run with the unit's file. */
 export type UnitEventSink = (event: unknown) => void;
 
+/** What the run offers a source in its own process. */
+export interface UnitRunHost {
+  /** Puts an event on the run's event spine, beside the runner's own. */
+  emit(fact: RunEventFact): void;
+  /** A `run` notice. */
+  notice(message: string): void;
+  /** Aborts once the run is interrupted. */
+  readonly signal: AbortSignal;
+}
+
 export interface UnitSource {
   /** The virtual files this source builds, in order. */
   readonly files: readonly string[];
   /** Builds `file` afresh; its tests report their unit-scoped events to `emit`. */
   build(file: string, emit: UnitEventSink): SourcedUnit;
+  /** The run has planned its units and may emit events from here on. Runner's process only. */
+  start?(run: UnitRunHost): void;
+  /** An event a unit reported, from whichever process it ran in. Runner's process only. */
+  receive?(file: string, event: unknown): void;
+  /**
+   * Runs once every unit is over and the engines and the app are gone,
+   * before the report is built. Runner's process only.
+   */
+  finish?(run: UnitRunHost): Promise<void>;
+  /** Fields the source adds to the report's `run`, read when the report is built. Runner's process only. */
+  report?(): UnitReportFields;
 }
 
 /** Where a worker process loads a source: a module exporting `createUnitSource`, and the plain data it is built from. */

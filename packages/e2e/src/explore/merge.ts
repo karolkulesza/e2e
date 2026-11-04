@@ -8,7 +8,8 @@
  */
 
 import { z } from 'zod';
-import type { ModelAdapter } from '../agent/model/adapter.ts';
+import { failureUsage, type ModelAdapter, type ModelResult } from '../agent/model/adapter.ts';
+import { errorMessage } from '../internal/errors.ts';
 import { deriveJsonSchema } from '../agent/model/schema.ts';
 import { ModelUsage } from '../agent/usage.ts';
 import type { ReportExploreFinding, ReportMergedFinding } from '../report/build.ts';
@@ -48,7 +49,22 @@ export interface MergeAnswer {
 /** The merge prompt's own version, recorded with the call's usage as a step's policy version is. */
 const MERGE_POLICY_VERSION = 'explore-merge/1';
 
-/** Asks the model once to group `findings`; throws when the call fails or answers outside the schema. */
+/** A merge call that failed, with what it cost when the provider answered before it failed. */
+export class MergeCallError extends Error {
+  constructor(
+    readonly reason: unknown,
+    readonly usage: StepModelInfo | undefined,
+  ) {
+    super(errorMessage(reason), { cause: reason });
+    this.name = 'MergeCallError';
+  }
+}
+
+/**
+ * Asks the model once to group `findings`. A call that fails throws a
+ * `MergeCallError` carrying the usage of the answer when there was one, an
+ * answer outside the schema included.
+ */
 export async function requestGroups(findings: readonly ReportExploreFinding[], settings: MergeSettings): Promise<MergeAnswer> {
   const reports = findings.map((finding, index) => ({
     index,
@@ -59,24 +75,33 @@ export async function requestGroups(findings: readonly ReportExploreFinding[], s
     reproduction: clip(finding.reproduction.join(' / '), MAX_REPRODUCTION_CHARS),
     ...(finding.path === undefined ? {} : { path: finding.path }),
   }));
-  const { value, usage } = await settings.adapter.generate({
-    system: MERGE_SYSTEM,
-    prompt: `Reports:\n${JSON.stringify(reports)}\n\nRespond with {"groups": [[...], ...]}.`,
-    schemaName: 'explore-merge',
-    schema: await deriveJsonSchema(MERGE_SCHEMA),
-    validate: (answer) => {
-      const parsed = MERGE_SCHEMA.safeParse(answer);
-      return parsed.success ? { ok: true, value: parsed.data } : { ok: false, issue: parsed.error.message };
-    },
-    maxOutputTokens: MERGE_OUTPUT_TOKENS,
-    maxInputTokens: settings.maxInputTokens,
-    providerOptions: settings.providerOptions,
-    signal: settings.signal,
-    timeoutMs: MERGE_TIMEOUT_MS,
-  });
-  const accounted = new ModelUsage();
-  accounted.record(usage);
-  return { groups: value.groups, usage: accounted.report({ ...settings.adapter.provenance, policyVersion: MERGE_POLICY_VERSION }, 1) };
+  const report = (usage: ModelResult<unknown>['usage']): StepModelInfo => {
+    const accounted = new ModelUsage();
+    accounted.record(usage);
+    return accounted.report({ ...settings.adapter.provenance, policyVersion: MERGE_POLICY_VERSION }, 1);
+  };
+  let answer: ModelResult<z.output<typeof MERGE_SCHEMA>>;
+  try {
+    answer = await settings.adapter.generate({
+      system: MERGE_SYSTEM,
+      prompt: `Reports:\n${JSON.stringify(reports)}\n\nRespond with {"groups": [[...], ...]}.`,
+      schemaName: 'explore-merge',
+      schema: await deriveJsonSchema(MERGE_SCHEMA),
+      validate: (value) => {
+        const parsed = MERGE_SCHEMA.safeParse(value);
+        return parsed.success ? { ok: true, value: parsed.data } : { ok: false, issue: parsed.error.message };
+      },
+      maxOutputTokens: MERGE_OUTPUT_TOKENS,
+      maxInputTokens: settings.maxInputTokens,
+      providerOptions: settings.providerOptions,
+      signal: settings.signal,
+      timeoutMs: MERGE_TIMEOUT_MS,
+    });
+  } catch (cause) {
+    const usage = failureUsage(cause);
+    throw new MergeCallError(cause, usage === undefined ? undefined : report(usage));
+  }
+  return { groups: answer.value.groups, usage: report(answer.usage) };
 }
 
 /**
