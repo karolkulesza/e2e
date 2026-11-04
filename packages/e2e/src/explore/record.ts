@@ -1,23 +1,22 @@
 /**
  * The exploration as the runner's process records it: one copy per
- * explorer, kept from the explorer's progress, whether the explorer runs in
- * this process or in a worker process that relays it. Its snapshot is
+ * explorer, kept from the progress each explorer reports as its unit's
+ * events, whichever process it runs in. Its snapshot is
  * `run.explore`; with parallel explorers it carries every explorer's steps
  * and the findings once merged.
  */
 
 import { errorMessage } from '../internal/errors.ts';
 import type { ReportExplore, ReportExploreFinding, ReportExploreMerge, ReportExploreStep } from '../report/build.ts';
-import { explorerCount, type ExploreSpec } from './explorer.ts';
-import type { MergeResult } from './merge.ts';
+import { explorerCount, explorerOfSpecFile, type ExploreSpec } from './explorer.ts';
+import { applyGroups, validateGroups, type MergeAnswer } from './merge.ts';
 import type { ExploreProgress } from './progress.ts';
-import type { ExploreState } from './state.ts';
 
-/** Hears every moment of every explorer; `explorer` is one-based, and undefined with a single explorer or for the merge. */
-export type ExploreRecordListener = (progress: ExploreProgress, explorer: number | undefined) => void;
+/** Hears every moment of every explorer as the `explore` run event carries it. */
+export type ExploreRecordListener = (event: { readonly progress: ExploreProgress; readonly explorer?: number | undefined }) => void;
 
-/** Merges the findings of parallel explorers; see `mergeFindings`. */
-export type MergeFindings = (findings: readonly ReportExploreFinding[], signal: AbortSignal) => Promise<MergeResult>;
+/** Asks for the grouping of parallel explorers' findings; see `requestGroups`. */
+export type RequestGroups = (findings: readonly ReportExploreFinding[], signal: AbortSignal) => Promise<MergeAnswer>;
 
 /** One explorer's record, as its progress built it. */
 interface Copy {
@@ -37,7 +36,7 @@ export class ExploreRecord {
 
   constructor(
     private readonly spec: ExploreSpec,
-    private readonly merge: MergeFindings,
+    private readonly requestGroups: RequestGroups,
   ) {
     this.#copies = Array.from({ length: explorerCount(spec) }, () => ({ ended: 'aborted', summary: undefined, steps: [], findings: [] }));
   }
@@ -47,19 +46,18 @@ export class ExploreRecord {
     return this.#copies.length > 1;
   }
 
-  /** Records an explorer that runs in this process, from its own state. */
-  attach(explorer: number, state: ExploreState): void {
-    state.subscribe((progress) => this.relay(explorer, progress));
-  }
-
   /** Registers a listener for every moment from here on. */
   subscribe(listener: ExploreRecordListener): void {
     this.#listeners.push(listener);
   }
 
-  /** Records one moment of explorer `explorer` (one-based) and passes it on; an unknown explorer is ignored. */
-  relay(explorer: number, progress: ExploreProgress): void {
-    const copy = this.#copies[explorer - 1];
+  /**
+   * Records one moment the explorer whose virtual file is `file` reported (a
+   * unit event) and passes it on; a file of no explorer is ignored.
+   */
+  relay(file: string, progress: ExploreProgress): void {
+    const explorer = explorerOfSpecFile(this.spec, file);
+    const copy = explorer === undefined ? undefined : this.#copies[explorer - 1];
     if (copy === undefined) return;
     switch (progress.phase) {
       case 'step-finished':
@@ -79,36 +77,50 @@ export class ExploreRecord {
   }
 
   #notify(progress: ExploreProgress, explorer: number | undefined): void {
-    for (const listener of this.#listeners) listener(progress, explorer);
+    for (const listener of this.#listeners) listener({ progress, ...(explorer === undefined ? {} : { explorer }) });
   }
 
   /**
    * Once every explorer is over: merges the findings of parallel explorers
-   * that describe the same failure. A failed merge keeps every finding, with
-   * a notice; an interrupted run is not merged. Runs once.
+   * that describe the same failure. Runs once, and not for a run already
+   * interrupted or with fewer than two findings. Once the call answered,
+   * its usage is recorded whatever happens next: an interrupt meanwhile
+   * keeps every finding (`interrupted`), and so does an invalid grouping or
+   * a failed call (`failed`, with a notice). Every outcome is announced as a
+   * `merge` moment carrying the findings the report keeps.
    */
   async settle(scope: { readonly signal: AbortSignal; readonly notice: (message: string) => void }): Promise<void> {
     if (!this.parallel || this.#merged !== undefined || scope.signal.aborted) return;
     const reported = this.#findings();
     if (reported.length < 2) return;
+    const keepAll = (merge: ReportExploreMerge): void => this.#settled(reported, merge);
+    let answer: MergeAnswer;
     try {
-      const { findings, usage } = await this.merge(reported, scope.signal);
-      if (scope.signal.aborted) return;
-      this.#merged = {
-        findings,
-        merge: {
-          status: 'merged',
-          reported: reported.length,
-          modelTokens: usage.inputTokens + usage.outputTokens,
-          ...(usage.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: usage.estimatedCostUsd }),
-        },
-      };
-      this.#notify({ phase: 'merged', reported: reported.length, findings }, undefined);
+      answer = await this.requestGroups(reported, scope.signal);
     } catch (cause) {
-      if (scope.signal.aborted) return;
-      this.#merged = { findings: reported, merge: { status: 'failed', reported: reported.length } };
-      scope.notice(`the findings of ${String(this.#copies.length)} explorers could not be merged, so all ${String(reported.length)} are kept: ${errorMessage(cause)}`);
+      if (scope.signal.aborted) return keepAll({ status: 'interrupted', reported: reported.length });
+      keepAll({ status: 'failed', reported: reported.length });
+      return this.#notMerged(scope, reported.length, cause);
     }
+    const accounted = { reported: reported.length, model: answer.usage };
+    if (scope.signal.aborted) return keepAll({ status: 'interrupted', ...accounted });
+    let partition: number[][];
+    try {
+      partition = validateGroups(answer.groups, reported.length);
+    } catch (cause) {
+      keepAll({ status: 'failed', ...accounted });
+      return this.#notMerged(scope, reported.length, cause);
+    }
+    this.#settled(applyGroups(reported, partition), { status: 'merged', ...accounted });
+  }
+
+  #settled(findings: readonly ReportExploreFinding[], merge: ReportExploreMerge): void {
+    this.#merged = { findings, merge };
+    this.#notify({ phase: 'merge', merge, findings }, undefined);
+  }
+
+  #notMerged(scope: { readonly notice: (message: string) => void }, reported: number, cause: unknown): void {
+    scope.notice(`the findings of ${String(this.#copies.length)} explorers could not be merged, so all ${String(reported)} are kept: ${errorMessage(cause)}`);
   }
 
   /** Every explorer's findings in explorer order, each tagged with its explorer and numbered across all of them. */

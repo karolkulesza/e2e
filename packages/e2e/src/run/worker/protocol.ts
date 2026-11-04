@@ -8,8 +8,6 @@
  */
 
 import type { TestIdentity } from '../../collect/collect.ts';
-import type { ExploreSpec } from '../../explore/explorer.ts';
-import type { ExploreProgress } from '../../explore/progress.ts';
 import type { ResolvedTestOptions, SkipInfo } from '../../collect/select.ts';
 import type { CliOverrides, PortAssignments, ResolvedTarget } from '../../config/resolve.ts';
 import type { AiTraceSnapshot } from '../../internal/ai-trace.ts';
@@ -18,6 +16,7 @@ import type { SerializedError } from '../../internal/errors.ts';
 import type { AttemptRecord, ResultRecord, RunError, SerialAttemptRecord, SerialGroupRecord, SerialMemberRecord, WireResultRecord } from '../records.ts';
 import type { SerialAttemptStart } from '../serial.ts';
 import type { StepProgress } from '../steps.ts';
+import type { UnitSourceModule } from '../unit-source.ts';
 
 /** One runnable pair on the wire; the worker resolves the test function. */
 export interface WirePair {
@@ -75,11 +74,10 @@ export interface WorkerBootstrap {
   /** Whether the worker should record model calls for `--ai-trace`. */
   readonly aiTrace: boolean;
   /**
-   * The exploration whose explorers this worker may run (`e2e explore
-   * --parallel`): a unit of an explorer's virtual file runs the explorer the
-   * worker builds from this spec.
+   * Where the worker loads the source of the run's virtual files, whose units
+   * it builds in memory instead of importing (`UnitSource`).
    */
-  readonly explore?: ExploreSpec | undefined;
+  readonly unitSource?: UnitSourceModule | undefined;
 }
 
 export interface RunUnitMessage {
@@ -311,12 +309,11 @@ export interface ShutdownDoneMessage {
   readonly aiTrace?: AiTraceSnapshot;
 }
 
-/** One moment of an explorer this worker runs; the runner records the exploration from these. */
-export interface ExploreMessage {
-  readonly type: 'explore';
-  /** One-based. */
-  readonly explorer: number;
-  readonly progress: ExploreProgress;
+/** An event a unit built in memory reported, as plain JSON, with the virtual file of its unit. */
+export interface UnitEventMessage {
+  readonly type: 'unit-event';
+  readonly file: string;
+  readonly event: unknown;
 }
 
 export interface FatalMessage {
@@ -353,7 +350,7 @@ export type WorkerToMain =
   | ShutdownDoneMessage
   | FatalMessage
   | RunAbortMessage
-  | ExploreMessage;
+  | UnitEventMessage;
 
 /** Reattaches the scheduler's resolved target to a wire result. */
 export function decodeResult(wire: WireResultRecord, target: ResolvedTarget): ResultRecord {

@@ -5,14 +5,17 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { describe, expect, it } from 'vitest';
 import type { ModelAdapter, ModelCall } from '../../src/agent/model/adapter.ts';
-import { explorerFile, type ExploreSpec } from '../../src/explore/explorer.ts';
+import { explorerFile, explorerSource, type ExploreSpec } from '../../src/explore/explorer.ts';
 import { exploreFocuses, focusContext } from '../../src/explore/focus.ts';
-import { applyGroups, mergeFindings } from '../../src/explore/merge.ts';
+import { applyGroups, requestGroups, validateGroups, type MergeAnswer } from '../../src/explore/merge.ts';
 import { planInstruction } from '../../src/explore/plan.ts';
 import { explorerOfFile, type ExploreProgress } from '../../src/explore/progress.ts';
-import { ExploreRecord, type MergeFindings } from '../../src/explore/record.ts';
+import { ExploreRecord, type RequestGroups } from '../../src/explore/record.ts';
 import { ExploreState } from '../../src/explore/state.ts';
 import type { ReportExploreFinding } from '../../src/report/build.ts';
+import { resolveConfig } from '../../src/config/resolve.ts';
+import type { E2EConfig } from '../../src/types.ts';
+import { installFakeModel } from '../helpers/fake-model.ts';
 
 const SCHEMA_PATH = path.resolve(fileURLToPath(import.meta.url), '..', '..', '..', 'schema', 'report-v1.schema.json');
 
@@ -61,7 +64,7 @@ function finding(overrides: Partial<ReportExploreFinding> = {}): ReportExploreFi
 
 /** An explorer's moments as its state would announce them: started, one step with the given findings, finished. */
 function explorerRun(record: ExploreRecord, explorer: number, findings: readonly ReportExploreFinding[], focus?: string): void {
-  const relay = (progress: ExploreProgress) => record.relay(explorer, progress);
+  const relay = (progress: ExploreProgress) => record.relay(`explore/${String(explorer)}`, progress);
   relay({ phase: 'started', goal: 'Explore the tracker', budgets: BUDGETS, ...(focus === undefined ? {} : { focus }) });
   relay({ phase: 'step-started', step: { index: 1, title: 'Issues', instruction: 'Create an issue' } });
   for (const entry of findings) relay({ phase: 'finding', finding: entry });
@@ -69,7 +72,31 @@ function explorerRun(record: ExploreRecord, explorer: number, findings: readonly
   relay({ phase: 'finished', ended: 'finished', summary: `Explorer ${String(explorer)} is done.` });
 }
 
-const neverMerge: MergeFindings = () => Promise.reject(new Error('no merge expected'));
+const neverMerge: RequestGroups = () => Promise.reject(new Error('no merge expected'));
+
+/** A merge call's usage, as `requestGroups` reports it. */
+const MERGE_USAGE: MergeAnswer['usage'] = {
+  provider: 'fake',
+  model: 'merge',
+  endpoint: 'local',
+  adapterVersion: 'test',
+  policyVersion: 'explore-merge/1',
+  calls: 1,
+  tokenAccounting: 'provider',
+  peakTokensPerCall: 430,
+  inputTokens: 400,
+  outputTokens: 30,
+  cacheReadTokens: 100,
+  estimatedCostUsd: 0.002,
+};
+
+/** A merge call that answers `groups`, or waits for `release` first. */
+function answering(groups: readonly (readonly number[])[], release?: Promise<void>): RequestGroups {
+  return async () => {
+    await release;
+    return { groups, usage: MERGE_USAGE };
+  };
+}
 const scope = (notices: string[] = [], signal = new AbortController().signal) => ({ signal, notice: (message: string) => void notices.push(message) });
 
 describe('explore focuses', () => {
@@ -107,44 +134,47 @@ describe('explore focuses', () => {
   });
 });
 
-describe('applyGroups', () => {
-  it('keeps the most detailed report of each group, graded as its gravest, with the ids of the others', () => {
+describe('validateGroups and applyGroups', () => {
+  it('keeps the most detailed report of each group, graded as its gravest, with the others', () => {
     const terse = finding({ severity: 2, kind: 'warning', actual: '0' });
     const detailed = finding({ severity: 3, actual: 'The count next to Issues reads 0 after creating one', explorer: 2 });
     const other = finding({ title: 'Sort ignores direction' });
-    const merged = applyGroups([terse, other, detailed], [[2, 0], [1]]);
+    const merged = applyGroups([terse, other, detailed], validateGroups([[2, 0]], 3));
     expect(merged).toEqual([
       { ...detailed, index: 0, kind: 'issue', severity: 3, merged: [{ id: terse.id, title: terse.title, step: 1 }] },
       { ...other, index: 1, kind: 'issue', severity: 3 },
     ]);
   });
 
-  it('never loses a finding: indices out of range or grouped twice are ignored, and ungrouped ones stand alone', () => {
-    const findings = [finding(), finding({ title: 'B' }), finding({ title: 'C' })];
-    const merged = applyGroups(findings, [[0, 0, 7, -1], [0, 2]]);
-    expect(merged.map((entry) => [entry.id, entry.merged])).toEqual([
-      [findings[0]!.id, undefined],
-      [findings[1]!.id, undefined],
-      [findings[2]!.id, undefined],
-    ]);
-    expect(merged.map((entry) => entry.index)).toEqual([0, 1, 2]);
+  it('turns every index the model left out into a group of its own', () => {
+    expect(validateGroups([[2, 0]], 4)).toEqual([[2, 0], [1], [3]]);
+    expect(validateGroups([], 2)).toEqual([[0], [1]]);
+  });
+
+  it('rejects a repeated, out-of-range, fractional, or empty grouping instead of repairing it', () => {
+    expect(() => validateGroups([[0, 1, 1], [2]], 3)).toThrow('the merge listed finding 1 more than once');
+    expect(() => validateGroups([[0, 1], [1, 2]], 3)).toThrow('the merge listed finding 1 more than once');
+    expect(() => validateGroups([[0, 3]], 3)).toThrow('the merge answered index 3, out of range for 3 findings');
+    expect(() => validateGroups([[-1]], 3)).toThrow('out of range');
+    expect(() => validateGroups([[0.5]], 3)).toThrow('out of range');
+    expect(() => validateGroups([[]], 3)).toThrow('the merge answered an empty group');
   });
 });
 
-describe('mergeFindings', () => {
-  it('asks the model once with every report and its index, and groups by its answer', async () => {
+describe('requestGroups', () => {
+  it('asks the model once with every report, its index, path, and actions, and reports the call as a model record', async () => {
     const calls: ModelCall<unknown>[] = [];
     const adapter: ModelAdapter = {
       provenance: { provider: 'fake', model: 'merge', endpoint: 'local', adapterVersion: 'test' },
       async generate<Value>(call: ModelCall<Value>) {
         calls.push(call as ModelCall<unknown>);
-        const validation = call.validate({ groups: [[0, 1], [2]] });
+        const validation = call.validate({ groups: [[0, 1, 1]] });
         if (!validation.ok) throw new Error(validation.issue);
-        return { value: validation.value, usage: { inputTokens: 300, outputTokens: 20, accounting: 'provider' as const, estimatedCostUsd: 0.001 }, reasoning: undefined };
+        return { value: validation.value, usage: { inputTokens: 300, outputTokens: 20, cacheReadTokens: 50, accounting: 'provider' as const, estimatedCostUsd: 0.001 }, reasoning: undefined };
       },
     };
     const findings = [finding({ path: '/issues' }), finding({ actual: 'The count reads 0 on the second project' }), finding({ title: 'Sort ignores direction' })];
-    const result = await mergeFindings(findings, { adapter, maxInputTokens: 100_000, providerOptions: undefined, signal: new AbortController().signal });
+    const answer = await requestGroups(findings, { adapter, maxInputTokens: 100_000, providerOptions: undefined, signal: new AbortController().signal });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.schemaName).toBe('explore-merge');
     expect(calls[0]!.system).toContain('same kind of screen with different data');
@@ -152,8 +182,24 @@ describe('mergeFindings', () => {
     expect(calls[0]!.prompt).toContain('"path":"/issues"');
     expect(calls[0]!.prompt).toContain('"reproduction":"Create an issue"');
     expect(calls[0]!.validate({ groups: 'all' }).ok).toBe(false);
-    expect(result.findings.map((entry) => entry.merged?.map((absorbed) => absorbed.id))).toEqual([[findings[0]!.id], undefined]);
-    expect(result.usage.inputTokens).toBe(300);
+    // The grouping passes the call unvalidated, so its usage survives an invalid one.
+    expect(answer.groups).toEqual([[0, 1, 1]]);
+    expect(answer.usage).toMatchObject({ provider: 'fake', model: 'merge', calls: 1, inputTokens: 300, outputTokens: 20, cacheReadTokens: 50, estimatedCostUsd: 0.001 });
+  });
+});
+
+describe('explorerSource', () => {
+  it('builds each explorer afresh, reports its progress as the unit\'s events, and runs its test as the explorer', () => {
+    const model = installFakeModel(() => ({}));
+    const raw = { targets: [{ name: 'web', platform: 'web' }], agents: { default: { model } } } as E2EConfig;
+    const source = explorerSource(spec(2), { entry: raw.agents!['default'], config: resolveConfig(raw, { projectRoot: '/project', env: {} }) });
+    expect(source.files).toEqual(['explore/1', 'explore/2']);
+    const events: unknown[] = [];
+    const built = source.build('explore/2', (event) => events.push(event));
+    expect(built.registration.tests[0]!.options.agentContext).toContain('Focus: edge-case input');
+    expect(built.attempts.agents?.get('default')?.tools).toHaveProperty('report_finding');
+    expect(() => source.build('explore', () => undefined)).toThrow('no explorer');
+    expect(events).toEqual([]);
   });
 });
 
@@ -161,9 +207,9 @@ describe('ExploreRecord', () => {
   it('records a single explorer exactly as its state does, with no explorer tags and no merge', async () => {
     const record = new ExploreRecord(spec(1), neverMerge);
     const state = new ExploreState('Explore the tracker', BUDGETS);
-    record.attach(1, state);
+    state.subscribe((progress) => record.relay('explore', progress));
     const heard: (number | undefined)[] = [];
-    record.subscribe((_, explorer) => heard.push(explorer));
+    record.subscribe((event) => heard.push(event.explorer));
     state.start();
     state.beginStep('Issues', 'Create an issue');
     state.addFinding({ title: 'Count stays at 0', kind: 'issue', severity: 3, expected: 'one', actual: 'zero', reproduction: ['Create an issue'] });
@@ -177,11 +223,12 @@ describe('ExploreRecord', () => {
   it('tags parallel explorers\' steps and findings, lists the explorers, and ends as the least complete of them', () => {
     const record = new ExploreRecord(spec(2), neverMerge);
     const heard: (number | undefined)[] = [];
-    record.subscribe((_, explorer) => heard.push(explorer));
+    record.subscribe((event) => heard.push(event.explorer));
     explorerRun(record, 1, [finding()], 'core flows');
-    record.relay(2, { phase: 'started', goal: 'Explore the tracker', budgets: BUDGETS, focus: 'edge-case input' });
-    record.relay(2, { phase: 'finished', ended: 'time' });
-    record.relay(9, { phase: 'finished', ended: 'stuck' });
+    record.relay('explore/2', { phase: 'started', goal: 'Explore the tracker', budgets: BUDGETS, focus: 'edge-case input' });
+    record.relay('explore/2', { phase: 'finished', ended: 'time' });
+    record.relay('explore/9', { phase: 'finished', ended: 'stuck' });
+    record.relay('tests/login.setup.e2e.ts', { phase: 'finished', ended: 'stuck' });
     const snapshot = record.snapshot();
     expect(snapshot.ended).toBe('time');
     expect(snapshot.summary).toBeUndefined();
@@ -195,15 +242,15 @@ describe('ExploreRecord', () => {
     assertValidExplore(snapshot);
   });
 
-  it('merges the explorers\' findings once they are over, and announces the merged list', async () => {
+  it('merges the explorers\' findings once they are over, and announces the merge with its usage', async () => {
     const asked: ReportExploreFinding[][] = [];
     const record = new ExploreRecord(spec(2), async (findings) => {
       asked.push([...findings]);
-      return { findings: applyGroups(findings, [[0, 1]]), usage: { inputTokens: 400, outputTokens: 30, accounting: 'provider', estimatedCostUsd: 0.002 } };
+      return { groups: [[0, 1]], usage: MERGE_USAGE };
     });
     const announced: ExploreProgress[] = [];
-    record.subscribe((progress, explorer) => {
-      if (explorer === undefined) announced.push(progress);
+    record.subscribe((event) => {
+      if (event.explorer === undefined) announced.push(event.progress);
     });
     const first = finding({ actual: 'The count reads 0 after creating an issue in the first project' });
     const second = finding();
@@ -213,21 +260,45 @@ describe('ExploreRecord', () => {
     expect(asked[0]!.map((entry) => [entry.id, entry.explorer, entry.index])).toEqual([[first.id, 1, 0], [second.id, 2, 1]]);
     const snapshot = record.snapshot();
     expect(snapshot.findings).toEqual([{ ...first, explorer: 1, index: 0, merged: [{ id: second.id, title: second.title, explorer: 2, step: 1 }] }]);
-    expect(snapshot.merge).toEqual({ status: 'merged', reported: 2, modelTokens: 430, estimatedCostUsd: 0.002 });
-    expect(announced).toEqual([{ phase: 'merged', reported: 2, findings: snapshot.findings }]);
+    expect(snapshot.merge).toEqual({ status: 'merged', reported: 2, model: MERGE_USAGE });
+    expect(announced).toEqual([{ phase: 'merge', merge: snapshot.merge, findings: snapshot.findings }]);
     assertValidExplore(snapshot);
   });
 
-  it('keeps every finding with a notice when the merge fails, and skips it when interrupted or with nothing to merge', async () => {
+  it('keeps every finding, and the usage of a call that answered, when the grouping is invalid or the call fails', async () => {
+    const invalid = new ExploreRecord(spec(2), answering([[0, 1, 1]]));
+    explorerRun(invalid, 1, [finding()]);
+    explorerRun(invalid, 2, [finding()]);
+    const notices: string[] = [];
+    await invalid.settle(scope(notices));
+    expect(invalid.snapshot().findings.map((entry) => entry.merged)).toEqual([undefined, undefined]);
+    expect(invalid.snapshot().merge).toEqual({ status: 'failed', reported: 2, model: MERGE_USAGE });
+    expect(notices).toEqual(['the findings of 2 explorers could not be merged, so all 2 are kept: the merge listed finding 1 more than once']);
+
     const failing = new ExploreRecord(spec(2), () => Promise.reject(new Error('provider unavailable')));
     explorerRun(failing, 1, [finding()]);
     explorerRun(failing, 2, [finding()]);
-    const notices: string[] = [];
-    await failing.settle(scope(notices));
+    await failing.settle(scope([]));
     expect(failing.snapshot().findings).toHaveLength(2);
     expect(failing.snapshot().merge).toEqual({ status: 'failed', reported: 2 });
-    expect(notices).toEqual(['the findings of 2 explorers could not be merged, so all 2 are kept: provider unavailable']);
+  });
 
+  it('keeps every finding and the usage when the run is interrupted while the call is pending', async () => {
+    const controller = new AbortController();
+    let release = (): void => undefined;
+    const record = new ExploreRecord(spec(2), answering([[0, 1]], new Promise<void>((resolve) => { release = resolve; })));
+    explorerRun(record, 1, [finding()]);
+    explorerRun(record, 2, [finding()]);
+    const settled = record.settle(scope([], controller.signal));
+    controller.abort();
+    release();
+    await settled;
+    expect(record.snapshot().findings).toHaveLength(2);
+    expect(record.snapshot().merge).toEqual({ status: 'interrupted', reported: 2, model: MERGE_USAGE });
+    assertValidExplore(record.snapshot());
+  });
+
+  it('does not merge a run interrupted before the merge, or one with fewer than two findings', async () => {
     const interrupted = new ExploreRecord(spec(2), neverMerge);
     explorerRun(interrupted, 1, [finding()]);
     explorerRun(interrupted, 2, [finding()]);
@@ -242,5 +313,26 @@ describe('ExploreRecord', () => {
     explorerRun(single, 2, []);
     await single.settle(scope());
     expect(single.snapshot().merge).toBeUndefined();
+  });
+
+  it('rejects in the schema a parallel record without explorer identity, an explorer past the count, and a merge with one explorer', () => {
+    const record = new ExploreRecord(spec(2), neverMerge);
+    explorerRun(record, 1, [finding()], 'core flows');
+    explorerRun(record, 2, [finding()], 'edge-case input');
+    const valid = record.snapshot();
+    assertValidExplore(valid);
+    const { explorer: _step, ...untaggedStep } = valid.steps[0]!;
+    expect(() => assertValidExplore({ ...valid, steps: [untaggedStep, valid.steps[1]] })).toThrow();
+    const { explorer: _finding, ...untaggedFinding } = valid.findings[0]!;
+    expect(() => assertValidExplore({ ...valid, findings: [untaggedFinding, valid.findings[1]] })).toThrow();
+    expect(() => assertValidExplore({ ...valid, findings: [{ ...valid.findings[0], explorer: 3 }, valid.findings[1]] })).toThrow();
+    expect(() => assertValidExplore({ ...valid, steps: [{ ...valid.steps[0], explorer: 999 }, valid.steps[1]] })).toThrow();
+    expect(() => assertValidExplore({ ...valid, explorers: [valid.explorers![0], { ...valid.explorers![1], index: 3 }] })).toThrow();
+    const { explorers: _explorers, ...single } = valid;
+    const singleSteps = single.steps.map((step) => ({ ...step, explorer: undefined }));
+    const singleFindings = single.findings.map((entry) => ({ ...entry, explorer: undefined }));
+    assertValidExplore({ ...single, steps: singleSteps, findings: singleFindings });
+    expect(() => assertValidExplore({ ...single, steps: singleSteps, findings: singleFindings, merge: { status: 'failed', reported: 2 } })).toThrow();
+    expect(() => assertValidExplore({ ...single, findings: singleFindings })).toThrow();
   });
 });

@@ -633,7 +633,23 @@
         { "index": 1, "focus": "core flows", "ended": "finished", "summary": "Creating issues works; the count is wrong." },
         { "index": 2, "focus": "edge-case input", "ended": "step-limit" }
       ],
-      "merge": { "status": "merged", "reported": 2, "modelTokens": 1200, "estimatedCostUsd": 0.002 }
+      "merge": {
+        "status": "merged",
+        "reported": 2,
+        "model": {
+          "provider": "example",
+          "model": "model-A",
+          "endpoint": "provider-default",
+          "adapterVersion": "ai-sdk/6.0.0",
+          "policyVersion": "explore-merge/1",
+          "calls": 1,
+          "tokenAccounting": "provider",
+          "peakTokensPerCall": 1200,
+          "inputTokens": 1100,
+          "outputTokens": 100,
+          "estimatedCostUsd": 0.002
+        }
+      }
     },
     "carried": {
       "results": [

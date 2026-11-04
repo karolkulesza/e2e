@@ -77,19 +77,23 @@ upload, and download. Several explorers with different focuses find more
 distinct defects than one; give each the whole goal rather than splitting it
 by area.
 
-Each explorer is one test (`explore/1` to `explore/<n>`) in its own worker,
-with its own `--max-steps` and `--timeout`. When each explorer gets a worker,
-wall time is the slowest explorer's while cost grows with n. The app command and the `--session` setup
-run once; the explorers share that app and its data, and are told so. A device target needs a device per explorer; with fewer, the run
-says so and the rest wait. With a config value instead of a file
+Each explorer is one test (`explore/1` to `explore/<n>`) in its own worker.
+`--max-steps` and `--timeout` are each explorer's own budget, not the run's:
+the run also spends time on setup, explorers waiting for a free worker, the
+merge (up to 2 minutes), and cleanup, and cost grows with n. The app command
+and the `--session` setup run once; the explorers share that app and its
+data, and are told so. A device target needs a device per explorer; with
+fewer, the run says so and the rest wait. With a config value instead of a file
 (`explore` on `e2e/runner`), the explorers run one after another.
 
 After the run, when at least two findings were reported and the run was not
 interrupted, one model call merges findings that describe the same failure
 (the same symptom on the same kind of screen with other data); the kept
 finding is the most detailed and lists the others in `merged`. If the
-call fails, every finding is kept and a notice says so. `merge` is in the
-report only when that call was made.
+call fails or answers an invalid grouping, every finding is kept and a notice
+says so; an interrupt during the call keeps every finding too. `merge` is in
+the report only when that call was made, with the call's usage once it
+answered, and the run's AI totals include it.
 
 ## Flags
 
@@ -100,7 +104,7 @@ report only when that call was made.
 | `--agent <name>` | `default` | Build the explorer from another configured agent (`agents.<name>`). |
 | `--session <name>` | none | Run the setup that saves this session, then explore with it restored. |
 | `--max-steps <n>` | 8 (1 to 100) | Exploration steps at most. |
-| `--timeout <ms>` | 600000 (180000 to 7200000) | Wall clock; the last minute is for the assessment. |
+| `--timeout <ms>` | 600000 (180000 to 7200000) | Each explorer's time budget; the last minute is for the assessment. |
 | `--parallel <n>` | 1 (1 to 5) | Explorers at once, each with its own focus and the budgets above; findings merged. |
 | `--headed`, `--reporter`, `--output`, `--debug`, `--ai-trace`, `--trace [mode]`, `--video [mode]` | as `run` | Same meaning as for `e2e run`. The exploration is one attempt, so a retry mode (`on-first-retry`, `on-all-retries`) records nothing (the run's notice says to pass `--trace on`); put the goal before a bare `--trace` or `--video`. |
 
@@ -142,7 +146,8 @@ medium 3, low 2, trivial 1. `.e2e/report.json` has the record under
 ```
 
 With `--parallel`, the record adds `explorers` (`index`, `focus`, `ended`,
-`summary`) and `merge` (`status: merged | failed`, `reported`), each step and
+`summary`) and `merge` (`status: merged | failed | interrupted`, `reported`,
+`model`: the call's usage), each step and
 finding has `explorer`, a merged finding has `merged` (`id`, `title`,
 `explorer`, `step`, `artifactId` of each absorbed finding), the top-level
 `summary` is absent, and `ended` is the least complete explorer's.

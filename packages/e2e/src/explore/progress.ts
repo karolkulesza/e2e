@@ -6,7 +6,7 @@
  * report is the record; these are its moments.
  */
 
-import type { ReportExplore, ReportExploreFinding, ReportExploreStep } from '../report/build.ts';
+import type { ReportExplore, ReportExploreFinding, ReportExploreMerge, ReportExploreStep } from '../report/build.ts';
 
 export interface ExploreBudgets {
   readonly maxSteps: number;
@@ -19,14 +19,15 @@ export type OpenedStep = Pick<ReportExploreStep, 'index' | 'title' | 'instructio
 export type ExploreProgress =
   /**
    * The exploration begins: its test has started and the app is about to
-   * open. A parallel explorer adds its focus label and how many explorers run.
+   * open. A parallel explorer adds its own focus label and every explorer's,
+   * in order, so a reporter knows the explorers that have not started yet.
    */
   | {
       readonly phase: 'started';
       readonly goal: string;
       readonly budgets: ExploreBudgets;
       readonly focus?: string | undefined;
-      readonly explorers?: number | undefined;
+      readonly focuses?: readonly string[] | undefined;
     }
   /** The planner is deciding the next charter, or (`closing`) the assessment that ends the run. */
   | { readonly phase: 'planning'; readonly closing: boolean }
@@ -36,10 +37,10 @@ export type ExploreProgress =
   | { readonly phase: 'finding'; readonly finding: ReportExploreFinding }
   | { readonly phase: 'finished'; readonly ended: ReportExplore['ended']; readonly summary?: string | undefined }
   /**
-   * Parallel explorers only, once every explorer is over: the findings with
-   * the ones describing the same failure merged, `reported` the count before.
+   * Parallel explorers only, once every explorer is over and a merge was
+   * attempted: its outcome and usage, and the findings the report keeps.
    */
-  | { readonly phase: 'merged'; readonly reported: number; readonly findings: readonly ReportExploreFinding[] };
+  | { readonly phase: 'merge'; readonly merge: ReportExploreMerge; readonly findings: readonly ReportExploreFinding[] };
 
 export type ExploreListener = (progress: ExploreProgress) => void;
 

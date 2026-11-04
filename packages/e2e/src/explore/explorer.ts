@@ -3,7 +3,8 @@
  * process builds every explorer to collect them as tests, and a worker
  * process builds the one its unit runs, since a test body cannot cross a
  * process boundary. Each explorer is one test in a virtual file of its own,
- * so each is its own work unit.
+ * so each is its own work unit; `explorerSource` hands them to the runner as
+ * a unit source, and `createUnitSource` builds the same in a worker process.
  */
 
 import type { ModuleRegistration, RegisteredTest } from '../collect/registry.ts';
@@ -14,7 +15,8 @@ import { createExploreBody } from './body.ts';
 import { explorerAgent, withFindingTool } from './executor.ts';
 import { focusContext, type ExploreFocus } from './focus.ts';
 import { signedInContext, type PlanAccount } from './plan.ts';
-import { explorerOfFile, parallelExplorerFile, type ExploreBudgets, type ExploreProgress } from './progress.ts';
+import type { CreateUnitSource, UnitSource } from '../run/unit-source.ts';
+import { parallelExplorerFile, type ExploreBudgets } from './progress.ts';
 import { ExploreState } from './state.ts';
 
 /** Each step's action and model-call budget when the config sets none: a charter is longer than a scripted step. */
@@ -80,7 +82,7 @@ export function explorerFile(spec: ExploreSpec, index: number): string {
  */
 export function buildExplorer(spec: ExploreSpec, index: number, sources: ExplorerSources, notice: (message: string) => void): Explorer {
   const focus = spec.focuses[index - 1];
-  const state = new ExploreState(spec.goal, spec.budgets, Date.now, focus, explorerCount(spec));
+  const state = new ExploreState(spec.goal, spec.budgets, Date.now, focus, spec.focuses.map((entry) => entry.label));
   const { agentName } = spec;
   const explorer = explorerAgent({ state, agentName, entry: sources.entry, resolved: sources.config.agent, notice });
   const resolved = resolveAgentConfig(exploreAgentConfig(explorer), `agents.${agentName}`);
@@ -143,22 +145,40 @@ function exploreRegistration(spec: ExploreSpec, state: ExploreState, focus: Expl
   return { tests: [test], hooks: [] };
 }
 
+/** Explorer `index` (one-based) whose virtual file `file` is, or undefined for any other file. */
+export function explorerOfSpecFile(spec: ExploreSpec, file: string): number | undefined {
+  for (let index = 1; index <= explorerCount(spec); index += 1) {
+    if (explorerFile(spec, index) === file) return index;
+  }
+  return undefined;
+}
+
 /**
- * The explorers a worker process runs: for the virtual file of one, the
- * explorer built from the spec in this process, its progress relayed to the
- * runner as it happens; undefined for any other file. A replaced executor
- * was already told about by the runner, so it is not told again.
+ * The explorers as the run's unit source: each virtual file builds its
+ * explorer afresh, which reports its progress as the unit's events and runs
+ * its test as the explorer. A replaced executor is told about once, before
+ * the run, so the source tells nothing.
  */
-export function workerExplorers(
-  spec: ExploreSpec,
-  sources: ExplorerSources,
-  relay: (explorer: number, progress: ExploreProgress) => void,
-): (file: string) => Explorer | undefined {
-  return (file) => {
-    const index = spec.focuses.length === 0 ? undefined : explorerOfFile(file);
-    if (index === undefined || index > spec.focuses.length) return undefined;
-    const explorer = buildExplorer(spec, index, sources, () => undefined);
-    explorer.state.subscribe((progress) => relay(index, progress));
-    return explorer;
+export function explorerSource(spec: ExploreSpec, sources: ExplorerSources): UnitSource {
+  return {
+    files: Array.from({ length: explorerCount(spec) }, (_, position) => explorerFile(spec, position + 1)),
+    build(file, emit) {
+      const index = explorerOfSpecFile(spec, file);
+      if (index === undefined) throw new Error(`"${file}" is no explorer's file`);
+      const explorer = buildExplorer(spec, index, sources, () => undefined);
+      explorer.state.subscribe(emit);
+      return { registration: explorer.registration, attempts: { agents: explorer.agents } };
+    },
   };
 }
+
+/** Where a worker process loads the explorers: this module, with the spec as its data. */
+export const EXPLORER_SOURCE_MODULE = import.meta.url;
+
+/** Builds the explorers in a worker process from the spec the runner sent (`UnitSourceModule.data`). */
+// Loaded by `loadUnitSource` from `EXPLORER_SOURCE_MODULE`, a dynamic import no static analysis follows.
+// fallow-ignore-next-line unused-export
+export const createUnitSource: CreateUnitSource = ({ data, raw, config }) => {
+  const spec = data as ExploreSpec;
+  return explorerSource(spec, { entry: raw.agents?.[spec.agentName], config });
+};

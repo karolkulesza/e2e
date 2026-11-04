@@ -23,6 +23,7 @@ import { appErrorsOf, type AppErrors } from './failure-text.ts';
 import {
   addCacheTally,
   addModelTally,
+  addModelUsage,
   addUsage,
   aiSegment,
   bounded,
@@ -58,6 +59,7 @@ import {
   type Colors,
   type Counters,
   type ModelTally,
+  stepModelLabel,
 } from './format.ts';
 import { leftOutTests } from './left-out.ts';
 import { explorerOfFile } from '../explore/progress.ts';
@@ -1082,6 +1084,13 @@ export class ListReporter implements Reporter {
     const view = this.explore;
     if (view === undefined) return;
     view.progress(progress, explorer);
+    // The merge is a model call outside any test, so its usage joins the run's here.
+    const merged = progress.phase === 'merge' ? progress.merge.model : undefined;
+    if (merged !== undefined) {
+      addModelUsage(this.runUsage, merged);
+      const label = stepModelLabel(merged);
+      if (label !== undefined) addModelTally(this.runModels, new Map([[label, merged.calls]]));
+    }
     if (!this.live) {
       const last = view.lastStep(explorer);
       if (progress.phase === 'step-finished' && last !== undefined) {
@@ -1252,6 +1261,7 @@ export class ListReporter implements Reporter {
     for (const group of this.groups.values()) {
       if (!group.printed && group.lines.length > 0) this.printGroup(group);
     }
+    this.explore?.finish();
     this.printExplore();
     const pages = event.traces ?? {};
     this.printFailures('Failed Tests', this.failures, pages);

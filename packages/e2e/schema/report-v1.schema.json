@@ -871,18 +871,279 @@
           "items": { "$ref": "#/$defs/explorer" }
         },
         "merge": {
-          "description": "The merge of parallel explorers' findings: merged when the model grouped them, failed when its call did not answer and every finding was kept. reported counts the findings before the merge.",
+          "description": "The merge of parallel explorers' findings, when one was attempted: merged when the model grouped them, failed when its call failed or its grouping was invalid, interrupted when the run was interrupted during the call; every finding is kept unless merged. reported counts the findings before the merge; model is the call's provenance and usage, once it answered.",
           "type": "object",
           "additionalProperties": false,
           "required": ["status", "reported"],
           "properties": {
-            "status": { "enum": ["merged", "failed"] },
-            "reported": { "type": "integer", "minimum": 0 },
-            "modelTokens": { "type": "integer", "minimum": 0 },
-            "estimatedCostUsd": { "type": "number", "minimum": 0 }
+            "status": { "enum": ["merged", "failed", "interrupted"] },
+            "reported": { "type": "integer", "minimum": 2 },
+            "model": { "$ref": "#/$defs/model" }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "explorers"
+            ]
+          },
+          "then": {
+            "properties": {
+              "steps": {
+                "items": {
+                  "required": [
+                    "explorer"
+                  ]
+                }
+              },
+              "findings": {
+                "items": {
+                  "required": [
+                    "explorer"
+                  ]
+                }
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "merge"
+              ]
+            },
+            "properties": {
+              "steps": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "explorer"
+                    ]
+                  }
+                }
+              },
+              "findings": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "explorer"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "explorers"
+            ],
+            "properties": {
+              "explorers": {
+                "maxItems": 2
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steps": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 2
+                    }
+                  }
+                }
+              },
+              "findings": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 2
+                    },
+                    "merged": {
+                      "items": {
+                        "properties": {
+                          "explorer": {
+                            "maximum": 2
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "explorers": {
+                "items": {
+                  "properties": {
+                    "index": {
+                      "maximum": 2
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "explorers"
+            ],
+            "properties": {
+              "explorers": {
+                "maxItems": 3
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steps": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 3
+                    }
+                  }
+                }
+              },
+              "findings": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 3
+                    },
+                    "merged": {
+                      "items": {
+                        "properties": {
+                          "explorer": {
+                            "maximum": 3
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "explorers": {
+                "items": {
+                  "properties": {
+                    "index": {
+                      "maximum": 3
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "explorers"
+            ],
+            "properties": {
+              "explorers": {
+                "maxItems": 4
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steps": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 4
+                    }
+                  }
+                }
+              },
+              "findings": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 4
+                    },
+                    "merged": {
+                      "items": {
+                        "properties": {
+                          "explorer": {
+                            "maximum": 4
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "explorers": {
+                "items": {
+                  "properties": {
+                    "index": {
+                      "maximum": 4
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "explorers"
+            ],
+            "properties": {
+              "explorers": {
+                "maxItems": 5
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steps": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 5
+                    }
+                  }
+                }
+              },
+              "findings": {
+                "items": {
+                  "properties": {
+                    "explorer": {
+                      "maximum": 5
+                    },
+                    "merged": {
+                      "items": {
+                        "properties": {
+                          "explorer": {
+                            "maximum": 5
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "explorers": {
+                "items": {
+                  "properties": {
+                    "index": {
+                      "maximum": 5
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

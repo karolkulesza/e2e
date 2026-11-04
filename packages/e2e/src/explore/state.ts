@@ -46,8 +46,8 @@ export class ExploreState {
     private readonly now: () => number = Date.now,
     /** A parallel explorer's focus; undefined when the exploration runs one explorer. */
     readonly focus?: ExploreFocus,
-    /** How many explorers the exploration runs, this one included. */
-    readonly explorers = 1,
+    /** Every parallel explorer's focus label, in order, this one's included. */
+    readonly focuses: readonly string[] = [],
   ) {}
 
   /** Why exploration stopped; `aborted` until `end` says otherwise. */
@@ -75,7 +75,7 @@ export class ExploreState {
       phase: 'started',
       goal: this.goal,
       budgets: { maxSteps: this.budgets.maxSteps, timeoutMs: this.budgets.timeoutMs },
-      ...(this.focus === undefined ? {} : { focus: this.focus.label, explorers: this.explorers }),
+      ...(this.focus === undefined ? {} : { focus: this.focus.label, focuses: this.focuses }),
     });
   }
 

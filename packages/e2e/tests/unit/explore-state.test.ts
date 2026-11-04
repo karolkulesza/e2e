@@ -14,7 +14,7 @@ function recorded(state: ExploreState): ExploreRecord {
     { goal: state.goal, budgets: state.budgets, agentName: 'default', accounts: [], session: undefined, openApp: true, focuses: [] },
     () => Promise.reject(new Error('one explorer merges nothing')),
   );
-  record.attach(1, state);
+  state.subscribe((progress) => record.relay('explore', progress));
   return record;
 }
 

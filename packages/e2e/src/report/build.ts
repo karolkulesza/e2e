@@ -198,14 +198,15 @@ export interface ReportExplorer {
 
 /**
  * The merge of parallel explorers' findings: `merged` when the model grouped
- * them, `failed` when its call did not answer and every finding was kept.
- * `reported` counts the findings before the merge; the usage is the call's.
+ * them, `failed` when its call failed or its grouping was invalid, and
+ * `interrupted` when the run was interrupted during the call; every finding
+ * is kept unless `merged`. `reported` counts the findings before the merge;
+ * `model` is the call's provenance and usage, once it answered.
  */
 export interface ReportExploreMerge {
-  status: 'merged' | 'failed';
+  status: 'merged' | 'failed' | 'interrupted';
   reported: number;
-  modelTokens?: number | undefined;
-  estimatedCostUsd?: number | undefined;
+  model?: StepModelInfo | undefined;
 }
 
 /** The `run.explore` block: what `e2e explore` was asked, did, and found. */
@@ -784,6 +785,17 @@ function computeUsage(options: {
   let costSeen = false;
   let cachedTokens: number | undefined;
 
+  const countModel = (model: StepModelInfo): void => {
+    usage.modelTokens = Math.min(Number.MAX_SAFE_INTEGER, usage.modelTokens + model.inputTokens + model.outputTokens);
+    if (model.cacheReadTokens !== undefined) {
+      cachedTokens = Math.min(Number.MAX_SAFE_INTEGER, (cachedTokens ?? 0) + model.cacheReadTokens);
+    }
+    if (model.estimatedCostUsd !== undefined) {
+      cost += model.estimatedCostUsd;
+      costSeen = true;
+    }
+  };
+
   const countStep = (step: StepRecord): void => {
     usage.events += step.events.length;
     const metrics = step.metrics;
@@ -794,17 +806,7 @@ function computeUsage(options: {
       usage.maxModelCallsInStep = Math.max(usage.maxModelCallsInStep, metrics.modelCalls);
       usage.maxActionStepsInStep = Math.max(usage.maxActionStepsInStep, metrics.actionSteps);
     }
-    const model = step.model;
-    if (model !== undefined) {
-      usage.modelTokens = Math.min(Number.MAX_SAFE_INTEGER, usage.modelTokens + model.inputTokens + model.outputTokens);
-      if (model.cacheReadTokens !== undefined) {
-        cachedTokens = Math.min(Number.MAX_SAFE_INTEGER, (cachedTokens ?? 0) + model.cacheReadTokens);
-      }
-      if (model.estimatedCostUsd !== undefined) {
-        cost += model.estimatedCostUsd;
-        costSeen = true;
-      }
-    }
+    if (step.model !== undefined) countModel(step.model);
   };
 
   const countArtifacts = (artifacts: readonly ArtifactRecord[]): void => {
@@ -828,12 +830,7 @@ function computeUsage(options: {
       }
     }
   }
-  const merge = options.merge;
-  if (merge?.modelTokens !== undefined) usage.modelTokens = Math.min(Number.MAX_SAFE_INTEGER, usage.modelTokens + merge.modelTokens);
-  if (merge?.estimatedCostUsd !== undefined) {
-    cost += merge.estimatedCostUsd;
-    costSeen = true;
-  }
+  if (options.merge?.model !== undefined) countModel(options.merge.model);
 
   return {
     ...usage,

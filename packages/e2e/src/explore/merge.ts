@@ -3,13 +3,16 @@
  * the same goal often meet the same defect, so once they are over one
  * structured model call groups the findings that describe the same failure,
  * and the report keeps the most detailed of each group. Nothing is ever
- * dropped: an index the model leaves out stays a finding of its own.
+ * dropped: an invalid grouping keeps every finding, and an index the model
+ * leaves out stays a finding of its own.
  */
 
 import { z } from 'zod';
-import type { ModelAdapter, ModelUsage } from '../agent/model/adapter.ts';
+import type { ModelAdapter } from '../agent/model/adapter.ts';
 import { deriveJsonSchema } from '../agent/model/schema.ts';
+import { ModelUsage } from '../agent/usage.ts';
 import type { ReportExploreFinding, ReportMergedFinding } from '../report/build.ts';
+import type { StepModelInfo } from '../run/steps.ts';
 import type { ProviderOptions } from '../types.ts';
 import { clip } from './state.ts';
 
@@ -26,7 +29,7 @@ Group the reports that describe the same observable failure under the same condi
 Every index appears in exactly one group; a report with no duplicate is a group of its own.`;
 
 const MERGE_SCHEMA = z.object({
-  groups: z.array(z.array(z.number().int().min(0))).describe('Groups of report indices; every index in exactly one group.'),
+  groups: z.array(z.array(z.number())).describe('Groups of report indices; every index in exactly one group.'),
 });
 
 export interface MergeSettings {
@@ -36,14 +39,17 @@ export interface MergeSettings {
   readonly signal: AbortSignal;
 }
 
-export interface MergeResult {
-  /** The findings with every group merged into one, numbered in order. */
-  readonly findings: ReportExploreFinding[];
-  readonly usage: ModelUsage;
+/** The merge call's answer, its grouping not yet validated, and what the call cost. */
+export interface MergeAnswer {
+  readonly groups: readonly (readonly number[])[];
+  readonly usage: StepModelInfo;
 }
 
-/** Groups `findings` with one model call and keeps one finding per group; throws when the call fails. */
-export async function mergeFindings(findings: readonly ReportExploreFinding[], settings: MergeSettings): Promise<MergeResult> {
+/** The merge prompt's own version, recorded with the call's usage as a step's policy version is. */
+const MERGE_POLICY_VERSION = 'explore-merge/1';
+
+/** Asks the model once to group `findings`; throws when the call fails or answers outside the schema. */
+export async function requestGroups(findings: readonly ReportExploreFinding[], settings: MergeSettings): Promise<MergeAnswer> {
   const reports = findings.map((finding, index) => ({
     index,
     title: finding.title,
@@ -68,27 +74,38 @@ export async function mergeFindings(findings: readonly ReportExploreFinding[], s
     signal: settings.signal,
     timeoutMs: MERGE_TIMEOUT_MS,
   });
-  return { findings: applyGroups(findings, value.groups), usage };
+  const accounted = new ModelUsage();
+  accounted.record(usage);
+  return { groups: value.groups, usage: accounted.report({ ...settings.adapter.provenance, policyVersion: MERGE_POLICY_VERSION }, 1) };
 }
 
 /**
- * One finding per group, in the order each group was first reported: the
- * most detailed report, graded as the gravest of its group so a merge never
- * lowers a defect, with the others in `merged`. An index out of
- * range or already grouped is ignored; one no group names stays on its own.
+ * The model's grouping of `count` findings as a partition, or an error
+ * naming what is wrong with it: an index out of range, an index listed more
+ * than once (within a group or across groups), or an empty group. An index
+ * the model left out is a group of its own.
  */
-export function applyGroups(findings: readonly ReportExploreFinding[], groups: readonly (readonly number[])[]): ReportExploreFinding[] {
+export function validateGroups(groups: readonly (readonly number[])[], count: number): number[][] {
   const seen = new Set<number>();
-  const members: number[][] = [];
   for (const group of groups) {
-    const fresh = group.filter((index) => Number.isSafeInteger(index) && index >= 0 && index < findings.length && !seen.has(index));
-    for (const index of fresh) seen.add(index);
-    if (fresh.length > 0) members.push(fresh);
+    if (group.length === 0) throw new Error('the merge answered an empty group');
+    for (const index of group) {
+      if (!Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error(`the merge answered index ${String(index)}, out of range for ${String(count)} findings`);
+      if (seen.has(index)) throw new Error(`the merge listed finding ${String(index)} more than once`);
+      seen.add(index);
+    }
   }
-  findings.forEach((_, index) => {
-    if (!seen.has(index)) members.push([index]);
-  });
-  return members
+  const omitted = Array.from({ length: count }, (_, index) => index).filter((index) => !seen.has(index));
+  return [...groups.map((group) => [...group]), ...omitted.map((index) => [index])];
+}
+
+/**
+ * One finding per group of a validated partition, in the order each group
+ * was first reported: the most detailed report, graded as the gravest of its
+ * group so a merge never lowers a defect, with the others in `merged`.
+ */
+export function applyGroups(findings: readonly ReportExploreFinding[], partition: readonly (readonly number[])[]): ReportExploreFinding[] {
+  return partition
     .map((group) => group.toSorted((a, b) => a - b))
     .toSorted((a, b) => a[0]! - b[0]!)
     .map((group, position) => {

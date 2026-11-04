@@ -775,7 +775,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     )
     .option(
       '--timeout <ms>',
-      `wall clock in milliseconds, ${TIMEOUT_BOUNDS.min} through ${TIMEOUT_BOUNDS.max} (default: ${TIMEOUT_BOUNDS.default})`,
+      `each explorer's time budget in milliseconds, ${TIMEOUT_BOUNDS.min} through ${TIMEOUT_BOUNDS.max} (default: ${TIMEOUT_BOUNDS.default})`,
       parseBoundedInt(TIMEOUT_BOUNDS),
     )
     .optionsGroup('Execution:')

@@ -21,10 +21,11 @@ import type { RunnerOutput } from '../run/process-output.ts';
 import { run, type RunOutcome } from '../run/runner.ts';
 import { registerStaticSecrets, staticSecretLedger } from '../run/secrecy.ts';
 import type { BuiltinReporter, E2EConfig, RecordingMode } from '../types.ts';
-import { buildExplorer, explorerCount, type Explorer, type ExploreSpec } from './explorer.ts';
+import { buildExplorer, EXPLORER_SOURCE_MODULE, explorerSource, type ExploreSpec } from './explorer.ts';
 import { exploreFocuses, PARALLEL_BOUNDS } from './focus.ts';
-import { mergeFindings } from './merge.ts';
+import { requestGroups } from './merge.ts';
 import type { PlanAccount } from './plan.ts';
+import type { ExploreProgress } from './progress.ts';
 import { ExploreRecord } from './record.ts';
 
 const DEFAULT_GOAL = 'Explore the app and find bugs';
@@ -157,15 +158,12 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     openApp: target.app.base !== undefined || launchesPinnedApp(target),
     focuses: parallel === 1 ? [] : exploreFocuses(parallel, { otherAccount: accounts.length > 1 && options.session === undefined }),
   };
-  // Every explorer is built here, so a missing model fails before anything
-  // starts; only the first tells about a replaced executor.
+  // Built once here, so a missing model fails before anything starts and a
+  // replaced executor is told about once; the run builds its own.
   const sources = { entry: raw.agents?.[agentName], config: resolved };
-  const explorers: Explorer[] = Array.from({ length: explorerCount(spec) }, (_, position) =>
-    buildExplorer(spec, position + 1, sources, position === 0 ? notice : () => undefined),
-  );
-  const merger = explorers[0]!.resolved;
+  const merger = buildExplorer(spec, 1, sources, notice).resolved;
   const record = new ExploreRecord(spec, (findings, signal) =>
-    mergeFindings(findings, {
+    requestGroups(findings, {
       adapter: createModelAdapter(merger.model, agentName),
       maxInputTokens: merger.maxInputTokens,
       providerOptions: merger.providerOptions,
@@ -173,14 +171,13 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     }),
   );
   // Parallel explorers run in worker processes of their own, which load the
-  // config file and rebuild their explorer from the spec. A config value
+  // config file and build their explorer from the spec. A config value
   // cannot cross into one, so its explorers run here, one after another.
-  const workers = parallel > 1 && configPath !== undefined ? { configPath, count: parallel, explore: spec } : undefined;
-  if (workers === undefined) {
-    for (const explorer of explorers) record.attach(explorer.index, explorer.state);
-    if (parallel > 1) {
-      notice(`the config is a value, not a file, so the ${String(parallel)} explorers run one after another in this process`);
-    }
+  const remote = parallel > 1 && configPath !== undefined
+    ? { configPath, workers: parallel, source: { module: EXPLORER_SOURCE_MODULE, data: spec } }
+    : undefined;
+  if (remote === undefined && parallel > 1) {
+    notice(`the config is a value, not a file, so the ${String(parallel)} explorers run one after another in this process`);
   }
   // The exploration is bounded by its own `--timeout`, not `maxDuration`.
   const { maxDuration: _maxDuration, ...runConfig } = raw;
@@ -190,10 +187,11 @@ export async function explore(options: ExploreOptions = {}): Promise<ExploreOutc
     agent: options.agent,
     env,
     tests: {
-      files: explorers.map(({ file, registration, agents }) => ({ file, registration, agents })),
+      source: explorerSource(spec, sources),
+      onUnitEvent: (file, event) => record.relay(file, event as ExploreProgress),
       explore: record,
       notices: earlyNotices,
-      ...(workers === undefined ? {} : { workers }),
+      ...(remote === undefined ? {} : { remote }),
     },
     targetIds: [target.name],
     headed: options.headed,

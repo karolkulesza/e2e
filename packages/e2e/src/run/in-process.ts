@@ -12,7 +12,7 @@ import type { ResolvedConfig, ResolvedTarget } from '../config/resolve.ts';
 import { isAbandonedRejection } from '../internal/abandoned.ts';
 import { classifyError, ConfigurationError, serializeError } from '../internal/errors.ts';
 import type { DebugTrace } from '../internal/debug.ts';
-import type { InMemoryFile } from './runner.ts';
+import type { UnitSource } from './unit-source.ts';
 import type { SessionStore } from './sessions.ts';
 import type { SpawnUnitRunner, UnitRunner, UnitRunnerEvents } from './unit-runner.ts';
 import { pairKey } from './units.ts';
@@ -23,14 +23,13 @@ export interface InProcessRunnerOptions {
   readonly config: ResolvedConfig;
   readonly selection: Selection;
   /**
-   * The tests supplied in memory (`RunOptions.tests`). There is no file to
-   * re-import, so the unit of a virtual file adopts its registration as its
-   * realm; each is one unit with no retries, so nothing asks for a second
-   * realm of it. The units of real files, a setup test the in-memory tests
-   * need, import their file as always. Their attempts run as described by
-   * `InMemoryAttempts`.
+   * Builds the tests supplied in memory (`RunOptions.tests`). There is no
+   * file to re-import, so the unit of a virtual file adopts the registration
+   * it builds as its realm; each is one unit with no retries, so nothing asks
+   * for a second realm of it. The units of real files, a setup test the
+   * in-memory tests need, import their file as always.
    */
-  readonly inMemory?: readonly InMemoryFile[] | undefined;
+  readonly unitSource?: UnitSource | undefined;
   readonly runId: string;
   readonly artifactsRoot: string;
   /** See `TargetExecutorOptions.rerunDir`. */
@@ -166,7 +165,6 @@ class InProcessRunner implements UnitRunner {
 
   private async bootstrap(): Promise<TargetWorkerDeps> {
     const { config } = this.options;
-    const inMemory = this.options.inMemory ?? [];
     const target = config.targets.find((candidate) => candidate.name === this.targetName);
     if (target === undefined) {
       throw new ConfigurationError('UNKNOWN_TARGET', `unknown target "${this.targetName}"`);
@@ -183,9 +181,8 @@ class InProcessRunner implements UnitRunner {
       env: this.options.envFor(this.targetName),
       isolated: false,
       debug: this.options.debug,
-      inMemory: new Map(inMemory.map(({ file, agents }) => [file, { agents }])),
-      resolvePairs: (unit) =>
-        resolveFromSelection(this.options.selection, target, unit, inMemory.find(({ file }) => file === unit.file)?.registration),
+      unitSource: this.options.unitSource,
+      resolvePairs: (unit, built) => resolveFromSelection(this.options.selection, target, unit, built),
     };
   }
 }

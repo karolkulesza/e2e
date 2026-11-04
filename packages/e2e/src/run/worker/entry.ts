@@ -9,8 +9,9 @@ import { collectFromRegistration } from '../../collect/collect.ts';
 import { collectModule } from '../../collect/registry.ts';
 import type { TestTargetPair } from '../../collect/select.ts';
 import { importModule, loadConfigModule } from '../../config/load.ts';
-import { assignPorts, resolveConfig, type ResolvedConfig } from '../../config/resolve.ts';
-import { workerExplorers } from '../../explore/explorer.ts';
+import { assignPorts, resolveConfig } from '../../config/resolve.ts';
+import type { ModuleRegistration } from '../../collect/registry.ts';
+import { loadUnitSource } from '../unit-source.ts';
 import { setSecretRegistry } from '../../secrets.ts';
 import { loadAiSdk } from '../../agent/ai-sdk.ts';
 import { AiTraceRecorder, registerAiTraceRecorder } from '../../internal/ai-trace.ts';
@@ -147,7 +148,6 @@ async function bootstrap(
   message: WorkerBootstrap,
   debug: DebugTrace,
   aiTrace: AiTraceRecorder | undefined,
-  emit: (message: WorkerToMain) => void,
 ): Promise<TargetWorkerDeps> {
   // Registered before the config loads: a config module may construct an
   // executor that imports the AI SDK itself, and the integration list is
@@ -180,22 +180,12 @@ async function bootstrap(
     (line) => process.stderr.write(`e2e: [warning] ${line}\n`),
   );
 
-  // An explorer's unit has no file to import: the worker builds the explorer
-  // from the spec, relays its progress, and runs its test as the explorer.
-  const inMemory = new Map<string, { readonly agents: ResolvedConfig['agents'] }>();
-  const explorers =
-    message.explore === undefined
-      ? undefined
-      : workerExplorers(message.explore, { entry: raw.agents?.[message.explore.agentName], config }, (explorer, progress) =>
-          emit({ type: 'explore', explorer, progress }),
-        );
+  const unitSource = message.unitSource === undefined ? undefined : await loadUnitSource(message.unitSource, { raw, config });
   let collectCounter = 0;
-  const resolvePairs = async (unit: RunUnitMessage): Promise<ResolvedUnitPairs> => {
+  const resolvePairs = async (unit: RunUnitMessage, built: ModuleRegistration | undefined): Promise<ResolvedUnitPairs> => {
     collectCounter += 1;
-    const explorer = explorers?.(unit.file);
-    if (explorer !== undefined) inMemory.set(unit.file, { agents: explorer.agents });
     const registration =
-      explorer?.registration ??
+      built ??
       (await collectModule(
         () => importModule(unit.absolutePath, `worker-collect-${collectCounter}`),
         unit.absolutePath,
@@ -233,7 +223,7 @@ async function bootstrap(
     isolated: true,
     resolvePairs,
     debug,
-    inMemory,
+    unitSource,
   };
 }
 
@@ -301,7 +291,7 @@ function main(): void {
       };
       worker = new TargetWorker(
         { emit, fatal, finished: () => exitAfterFlush(0) },
-        () => bootstrap(message.bootstrap, debug, aiTrace, emit),
+        () => bootstrap(message.bootstrap, debug, aiTrace),
       );
       worker.start();
       return;

@@ -39,8 +39,6 @@ import { AiTraceCollector, AiTraceRecorder, registerAiTraceRecorder } from '../i
 import { DebugTrace } from '../internal/debug.ts';
 import { printableUrl } from '../internal/urls.ts';
 import { resultId, timestamp, uuidv7 } from '../internal/ids.ts';
-import type { ExploreSpec } from '../explore/explorer.ts';
-import type { ExploreProgress } from '../explore/progress.ts';
 import { buildReport, projectSource, type Report1Document, type ReportChanges, type ReportExplore, type ReportFilter, type TargetProvenance } from '../report/build.ts';
 import { agentStepTable } from '../report/debug-steps.ts';
 import { writeTracePages, type TracePages } from '../report/traces.ts';
@@ -48,7 +46,7 @@ import { STATELESS_REPORTERS } from '../report/builtin.ts';
 import { failureLine } from '../report/format.ts';
 import { ListReporter } from '../report/list.ts';
 import { writeJsonReport } from '../report/write.ts';
-import { createRunEventEmitter, toEventResult, type RunEventSink, type RunExitCode, type RunStatus, type RunEventFact, type SetupOutcome, type SetupStep } from './events.ts';
+import { createRunEventEmitter, toEventResult, type RunEventOf, type RunEventSink, type RunExitCode, type RunStatus, type RunEventFact, type SetupOutcome, type SetupStep } from './events.ts';
 import { allocateAppPorts } from './app-ports.ts';
 import { inProcessSpawner } from './in-process.ts';
 import { cleanupErrorsOf, someSkippedAfterFailure, tracedResultIds, type ResultRecord, type RunError, type SerialGroupRecord } from './records.ts';
@@ -60,6 +58,7 @@ import type { RunnerOutput } from './process-output.ts';
 import { registerStaticSecrets } from './secrecy.ts';
 import { nextRerunDir, pruneArtifacts } from './artifacts.ts';
 import { carryForward, fileDurationKey, lastFailedIds, previousFileDurations, readLastRun, reportArtifactPaths, type RerunCollection } from './last-run.ts';
+import type { UnitSource, UnitSourceModule } from './unit-source.ts';
 import { childProcessSpawner } from './worker/handle.ts';
 import { setSecretRegistry } from '../secrets.ts';
 import { budgetText, withAbort } from '../internal/time.ts';
@@ -229,17 +228,28 @@ export interface RunOptions {
 }
 
 /**
- * Registrations supplied in memory, each under the virtual file name the
- * report shows for it. When one of their tests consumes a session, the
- * config's test files are collected too, none of them selected, so the
- * setup test that produces the session runs first, exactly as it would for
- * `e2e run`.
+ * Tests built in memory instead of discovered from files, under the virtual
+ * file names the report shows for them. When one of their tests consumes a
+ * session, the config's test files are collected too, none of them selected,
+ * so the setup test that produces the session runs first, exactly as it
+ * would for `e2e run`.
  */
 export interface InMemoryTests {
-  readonly files: readonly InMemoryFile[];
+  /** Builds each virtual file: once to collect it, and afresh for its unit. */
+  readonly source: UnitSource;
   /**
-   * The exploration behind `e2e explore`: its progress becomes `explore` run
-   * events, and its record is read once the run is over, as `run.explore`.
+   * Set when worker processes can build the same tests: they load
+   * `configPath`, the file the run's config value came from, and the source
+   * `source` names. The run then executes on `workers` worker processes
+   * instead of in this one.
+   */
+  readonly remote?: { readonly configPath: string; readonly workers: number; readonly source: UnitSourceModule } | undefined;
+  /** Receives the events the in-memory tests report, with their virtual file. */
+  readonly onUnitEvent?: ((file: string, event: unknown) => void) | undefined;
+  /**
+   * The exploration behind `e2e explore`: its moments become `explore` run
+   * events, it settles once every test is over, and its record is read at
+   * the end, as `run.explore`.
    */
   readonly explore?: InMemoryExplore | undefined;
   /**
@@ -248,41 +258,19 @@ export interface InMemoryTests {
    * started, for a caller with no terminal of its own to print them on.
    */
   readonly notices?: readonly string[] | undefined;
-  /**
-   * Set when worker processes can rebuild the in-memory tests themselves:
-   * they load `configPath`, the file the run's config value came from, and
-   * build each exploration test from `explore`. The run then executes on
-   * `count` worker processes instead of in this one.
-   */
-  readonly workers?: { readonly configPath: string; readonly count: number; readonly explore: ExploreSpec } | undefined;
 }
 
-/** One virtual file of tests registered in memory. */
-export interface InMemoryFile {
-  readonly file: string;
-  readonly registration: ModuleRegistration;
-  /**
-   * The agents the file's tests run as, in place of the config's: an
-   * explorer. Setup tests they need run as the config's own agents, with the
-   * config's cache and retries; the in-memory tests run with the trace cache off.
-   */
-  readonly agents?: ResolvedConfig['agents'] | undefined;
-}
-
-/** What the runner needs from an exploration: its moments as they happen, the merge once the tests are over, and its record at the end. */
+/** What the runner needs from an exploration: its moments as they happen, the work once the tests are over, and its record at the end. */
 export interface InMemoryExplore {
   snapshot(): ReportExplore;
-  /** `explorer` is one-based, and undefined with a single explorer. */
-  subscribe(listener: (progress: ExploreProgress, explorer: number | undefined) => void): void;
-  /** A moment an explorer in a worker process reported. */
-  relay(explorer: number, progress: ExploreProgress): void;
-  /** Runs once every test is over, before the report is built. */
+  subscribe(listener: (event: Omit<RunEventOf<'explore'>, 'type'>) => void): void;
+  /** Runs once every test is over and the engines and app are gone, before the report is built. */
   settle(scope: { readonly signal: AbortSignal; readonly notice: (message: string) => void }): Promise<void>;
 }
 
 /** Whether a test of the registrations consumes a session a setup test produces. */
-function consumesSession(files: readonly InMemoryFile[]): boolean {
-  return files.some(({ registration }) => registration.tests.some((test) => test.options.session !== undefined));
+function consumesSession(registrations: readonly { readonly registration: ModuleRegistration }[]): boolean {
+  return registrations.some(({ registration }) => registration.tests.some((test) => test.options.session !== undefined));
 }
 
 /** How long a reporter's `onRunFinished` may take before the run stops waiting for it. */
@@ -845,13 +833,16 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     try {
       planned = await setupStep({ kind: 'collect' }, () =>
         debug.time('collect', async () => {
+          // Built once to collect: each unit builds its file afresh when it runs.
+          const source = options.tests?.source;
+          const inMemoryFiles = source?.files.map((file) => ({ file, registration: source.build(file, () => undefined).registration })) ?? [];
           const collection =
             options.tests === undefined
               ? await collect(config, options.files, graph)
               : collectInMemory(
                   config.projectRoot,
-                  options.tests.files,
-                  consumesSession(options.tests.files) ? await collectSetups(config) : undefined,
+                  inMemoryFiles,
+                  consumesSession(inMemoryFiles) ? await collectSetups(config) : undefined,
                 );
           const inputs = await selectionInputs(options, config);
           lastRun = inputs.lastRun;
@@ -929,13 +920,12 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // boundary (it may hold live engine handles), and neither can the bodies
     // of tests registered in memory, so either runs in-process against one
     // worker: `workerConfigPath` is the file a child process would load, and
-    // there is none in either case. Explorers are the exception: a worker
-    // loads the file their config value came from and builds its explorer
-    // itself, and the run has one worker per explorer.
-    const inMemoryWorkers = options.tests?.workers;
-    const workerConfigPath = options.tests === undefined ? config.configPath : inMemoryWorkers?.configPath;
+    // there is none in either case, unless worker processes can build the
+    // in-memory tests themselves (`InMemoryTests.remote`).
+    const remote = options.tests?.remote;
+    const workerConfigPath = options.tests === undefined ? config.configPath : remote?.configPath;
     const inProcess = workerConfigPath === undefined;
-    const runWorkers = inProcess ? 1 : (inMemoryWorkers?.count ?? config.workers);
+    const runWorkers = inProcess ? 1 : (remote?.workers ?? config.workers);
     if (runWorkers > 1) {
       const previous = await previousFileDurations(outputLayout(config.output).report);
       plans = longestFirst(plans, (targetName, file) => previous.get(fileDurationKey(targetName, file)));
@@ -964,11 +954,11 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       }
     }
     if (interrupted.aborted) return;
-    if (inMemoryWorkers !== undefined) {
+    if (remote !== undefined) {
       for (const plan of plans) {
-        const capacity = Math.min(plan.workers ?? plan.target.engine?.workers ?? inMemoryWorkers.count, inMemoryWorkers.count);
-        if (capacity < inMemoryWorkers.count) {
-          notice('run', `target "${plan.target.name}" runs ${String(capacity)} of the ${String(inMemoryWorkers.count)} explorers at a time (its engine provides ${String(capacity)} worker${capacity === 1 ? '' : 's'}); the others start as one finishes`);
+        const capacity = Math.min(plan.workers ?? plan.target.engine?.workers ?? remote.workers, remote.workers);
+        if (capacity < remote.workers) {
+          notice('run', `target "${plan.target.name}" runs ${String(capacity)} of its ${String(remote.workers)} tests at a time (its engine provides ${String(capacity)} worker${capacity === 1 ? '' : 's'}); the others start as one finishes`);
         }
       }
     }
@@ -979,7 +969,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // is on the clock and a one-off download is not.
     startedAt = timestamp();
     emit({ type: 'plan', total: selection.pairs.length, files: plannedFiles(selection) });
-    options.tests?.explore?.subscribe((progress, explorer) => emit({ type: 'explore', progress, ...(explorer === undefined ? {} : { explorer }) }));
+    options.tests?.explore?.subscribe((event) => emit({ type: 'explore', ...event }));
 
     // Each selected target declares the app it drives and the command that
     // starts it. Nothing spawns once the run was interrupted. Each command is
@@ -1051,7 +1041,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         ? inProcessSpawner({
             config,
             selection,
-            inMemory: options.tests?.files,
+            unitSource: options.tests?.source,
             runId,
             artifactsRoot,
             rerunDir,
@@ -1074,7 +1064,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
             sessionKeyBase64: store.exportKeyForWorker(),
             debug: debug.enabled,
             aiTrace: aiTrace !== undefined,
-            ...(inMemoryWorkers === undefined ? {} : { explore: inMemoryWorkers.explore }),
+            ...(remote === undefined ? {} : { unitSource: remote.source }),
             envFor: workerEnvFor(plans, env),
           });
 
@@ -1111,7 +1101,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
             if (printsTestOutput) processOutput?.testOutput(output.stream, output.text);
           },
           onNotice: (message, targetName) => notice(targetName, message),
-          onExplore: (explorer, progress) => options.tests?.explore?.relay(explorer, progress),
+          onUnitEvent: (file, event) => options.tests?.onUnitEvent?.(file, event),
           onDebug: (snapshot) => debug.merge(snapshot),
           onAiTrace: (snapshot) => aiTrace?.merge(snapshot),
         },
@@ -1169,8 +1159,8 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         recordFailure(cause);
       }
     }
-    // The merge of parallel explorers' findings needs nothing the run held,
-    // so it waits until the engines and the app are gone.
+    // Settling needs nothing the run held, so it waits until the engines and
+    // the app are gone.
     try {
       await options.tests?.explore?.settle({ signal: interruptController.signal, notice: (message) => notice('run', message) });
     } catch (cause) {

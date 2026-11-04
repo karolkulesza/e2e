@@ -80,6 +80,8 @@ interface OpenStep {
 interface Lane {
   /** The explorer's focus label, for parallel explorers. */
   readonly focus: string | undefined;
+  /** Whether the explorer's test has started; a parallel explorer's lane exists from the first explorer's start. */
+  started: boolean;
   readonly steps: FinishedStep[];
   open: OpenStep | undefined;
   /** What the planner is deciding while no step is open: nothing, the next step, or the closing assessment. */
@@ -104,8 +106,6 @@ export class ExploreView {
   private readonly artifacts: ArtifactRecord[] = [];
   /** High-water mark of the live rows; the window pads up to it. */
   private reservedRows = RESERVED_ROWS;
-  /** How many explorers run, as the first parallel explorer to start announced; 1 for a single exploration. */
-  private explorers = 1;
 
   constructor(
     private readonly pc: Colors,
@@ -119,13 +119,13 @@ export class ExploreView {
 
   /** Whether several explorers report into the view. */
   get parallel(): boolean {
-    return this.explorers > 1;
+    return this.lanes.size > 1;
   }
 
-  private lane(explorer: number): Lane {
+  private lane(explorer: number, focus?: string): Lane {
     let lane = this.lanes.get(explorer);
     if (lane === undefined) {
-      lane = { focus: undefined, steps: [], open: undefined, planning: undefined, ended: undefined, summary: undefined };
+      lane = { focus, started: false, steps: [], open: undefined, planning: undefined, ended: undefined, summary: undefined };
       this.lanes.set(explorer, lane);
     }
     return lane;
@@ -138,16 +138,18 @@ export class ExploreView {
 
   /** Applies one moment of the exploration; `explorer` is one-based, and undefined with one explorer and for the merge. */
   progress(progress: ExploreProgress, explorer?: number): void {
-    if (progress.phase === 'merged') {
-      this.reported = progress.reported;
+    if (progress.phase === 'merge') {
+      this.reported = progress.merge.reported;
       this.findings = [...progress.findings];
       return;
     }
+    // Every explorer gets its lane from the first start, so one that never
+    // starts (an interrupt, a busy engine) is still shown and counted.
+    if (progress.phase === 'started') progress.focuses?.forEach((focus, position) => this.lane(position + 1, focus));
     const lane = this.lane(explorer ?? 1);
     switch (progress.phase) {
       case 'started':
-        if (progress.focus !== undefined) this.lanes.set(explorer ?? 1, { ...lane, focus: progress.focus });
-        this.explorers = Math.max(this.explorers, progress.explorers ?? 1);
+        lane.started = true;
         break;
       case 'planning':
         lane.planning = progress.closing ? 'closing' : 'step';
@@ -194,8 +196,20 @@ export class ExploreView {
 
   /** Whether every explorer is over, those not started yet included. */
   private get over(): boolean {
-    const ended = [...this.lanes.values()].filter((lane) => lane.ended !== undefined).length;
-    return ended >= this.explorers;
+    return this.lanes.size > 0 && [...this.lanes.values()].every((lane) => lane.ended !== undefined);
+  }
+
+  /**
+   * The run is over: an explorer that did not finish, or never started,
+   * ended as the report records it, `aborted`.
+   */
+  finish(): void {
+    for (const lane of this.lanes.values()) {
+      if (lane.ended !== undefined) continue;
+      lane.ended = 'aborted';
+      lane.open = undefined;
+      lane.planning = undefined;
+    }
   }
 
   /** `[2] ` before a parallel explorer's rows; nothing with one explorer. */
@@ -303,7 +317,11 @@ export class ExploreView {
       for (const [explorer, lane] of lanes) {
         if (budget < 1) break;
         const state =
-          lane.ended === undefined ? `${String(lane.steps.length)} of ${String(this.budgets.maxSteps)} steps done` : `ended: ${ENDED_TEXT[lane.ended]}`;
+          lane.ended !== undefined
+            ? `ended: ${ENDED_TEXT[lane.ended]}`
+            : lane.started
+              ? `${String(lane.steps.length)} of ${String(this.budgets.maxSteps)} steps done`
+              : 'waiting for a worker';
         const rows = [
           `${LIVE_INDENT}${this.tag(explorer)}${bounded(lane.focus ?? '')} ${pc.dim(state)}`,
           ...this.currentRows(lane, eventsOf(explorer), now, Math.min(share, budget) - 1),
@@ -373,13 +391,13 @@ export class ExploreView {
           ].join(pc.dim(' | '));
     const lanes = this.ordered().map(([, lane]) => lane);
     const done = lanes.reduce((total, lane) => total + lane.steps.length, 0);
-    const budget = this.budgets.maxSteps * this.explorers;
+    const budget = this.budgets.maxSteps * Math.max(1, lanes.length);
     const steps: string[] = [];
     if (!this.over) {
       steps.push(`${done} done of ${budget}`);
       if (this.parallel) {
-        const running = lanes.filter((lane) => lane.ended === undefined).length;
-        const waiting = this.explorers - lanes.length;
+        const running = lanes.filter((lane) => lane.started && lane.ended === undefined).length;
+        const waiting = lanes.filter((lane) => !lane.started && lane.ended === undefined).length;
         steps.push(`${running} explorer${running === 1 ? '' : 's'} running`, ...(waiting > 0 ? [`${waiting} waiting`] : []));
       } else {
         const lane = lanes[0];
@@ -388,7 +406,7 @@ export class ExploreView {
         else if (lane?.planning === 'step') steps.push('planning');
       }
     } else {
-      const ended = this.parallel ? `${String(this.explorers)} explorers` : ENDED_TEXT[lanes[0]!.ended!];
+      const ended = this.parallel ? `${String(lanes.length)} explorers` : ENDED_TEXT[lanes[0]!.ended!];
       steps.push(`${done} of ${budget}`, ...this.outcomeParts(lanes), pc.dim(ended));
     }
     return [padTitle(pc, 'Findings') + findings, padTitle(pc, 'Steps') + steps.join(pc.dim(' · '))];
