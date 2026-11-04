@@ -78,16 +78,18 @@ distinct defects than one; give each the whole goal rather than splitting it
 by area.
 
 Each explorer is one test (`explore/1` to `explore/<n>`) in its own worker,
-with its own `--max-steps` and `--timeout`, so wall time stays about one
-explorer's while cost grows with n. The app command and the `--session` setup
+with its own `--max-steps` and `--timeout`. When each explorer gets a worker,
+wall time is the slowest explorer's while cost grows with n. The app command and the `--session` setup
 run once; the explorers share that app and its data, and are told so. A device target needs a device per explorer; with fewer, the run
 says so and the rest wait. With a config value instead of a file
 (`explore` on `e2e/runner`), the explorers run one after another.
 
-After the run, one model call merges findings that describe the same failure
+After the run, when at least two findings were reported and the run was not
+interrupted, one model call merges findings that describe the same failure
 (the same symptom on the same kind of screen with other data); the kept
 finding is the most detailed and lists the others in `merged`. If the
-call fails, every finding is kept and a notice says so.
+call fails, every finding is kept and a notice says so. `merge` is in the
+report only when that call was made.
 
 ## Flags
 

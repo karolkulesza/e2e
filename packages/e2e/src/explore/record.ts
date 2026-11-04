@@ -93,6 +93,7 @@ export class ExploreRecord {
     if (reported.length < 2) return;
     try {
       const { findings, usage } = await this.merge(reported, scope.signal);
+      if (scope.signal.aborted) return;
       this.#merged = {
         findings,
         merge: {

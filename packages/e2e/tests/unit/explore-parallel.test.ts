@@ -150,6 +150,7 @@ describe('mergeFindings', () => {
     expect(calls[0]!.system).toContain('same kind of screen with different data');
     expect(calls[0]!.prompt).toContain('"index":2');
     expect(calls[0]!.prompt).toContain('"path":"/issues"');
+    expect(calls[0]!.prompt).toContain('"reproduction":"Create an issue"');
     expect(calls[0]!.validate({ groups: 'all' }).ok).toBe(false);
     expect(result.findings.map((entry) => entry.merged?.map((absorbed) => absorbed.id))).toEqual([[findings[0]!.id], undefined]);
     expect(result.usage.inputTokens).toBe(300);

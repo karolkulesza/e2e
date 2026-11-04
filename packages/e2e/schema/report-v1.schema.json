@@ -867,6 +867,7 @@
           "description": "The parallel explorers, in order; absent with one.",
           "type": "array",
           "minItems": 2,
+          "maxItems": 5,
           "items": { "$ref": "#/$defs/explorer" }
         },
         "merge": {

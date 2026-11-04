@@ -11,10 +11,13 @@ import type { ModelAdapter, ModelUsage } from '../agent/model/adapter.ts';
 import { deriveJsonSchema } from '../agent/model/schema.ts';
 import type { ReportExploreFinding, ReportMergedFinding } from '../report/build.ts';
 import type { ProviderOptions } from '../types.ts';
+import { clip } from './state.ts';
 
 /** The merge call's deadline: one small structured call, on a slow provider. */
 const MERGE_TIMEOUT_MS = 120_000;
 const MERGE_OUTPUT_TOKENS = 4_096;
+/** A finding's actions as the merge reads them, at most. */
+const MAX_REPRODUCTION_CHARS = 400;
 
 const MERGE_SYSTEM = `You merge the bug reports of several testers who explored the same app at the same time, each with a different focus.
 Group the reports that describe the same observable failure under the same conditions:
@@ -46,6 +49,8 @@ export async function mergeFindings(findings: readonly ReportExploreFinding[], s
     title: finding.title,
     expected: finding.expected,
     actual: finding.actual,
+    // The inputs that tell two failures apart, bounded so many findings still fit one call.
+    reproduction: clip(finding.reproduction.join(' / '), MAX_REPRODUCTION_CHARS),
     ...(finding.path === undefined ? {} : { path: finding.path }),
   }));
   const { value, usage } = await settings.adapter.generate({
