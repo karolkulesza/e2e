@@ -1,7 +1,6 @@
 ---
 title: From Cypress
 description: Replace Cypress command chains with async tests and keep your data-cy attributes.
-icon: "/images/icons/cypress.svg"
 "og:image": "https://e2e.com/docs/images/og/migrate/cypress.png?v=e4e71f42dc"
 "twitter:image": "https://e2e.com/docs/images/og/migrate/cypress.png?v=e4e71f42dc"
 ---
@@ -47,7 +46,7 @@ Keep your `data-cy` attributes. The config below reads them as test ids.
 | `data-cy` selectors | `web({ testIdAttribute: 'data-cy' })`, then `screen.getByTestId` |
 | `retries` | `retries` |
 | `env`, `Cypress.env()` | `process.env` |
-| `cypress.env.json` secrets | `credentials` and `secrets`, see [Signing in](/authentication) |
+| `cypress.env.json` secrets | `credentials` and `secrets`, see [Authentication](/authentication) |
 | `cypress run --browser firefox` | A second target with `web({ browser: 'firefox' })` |
 | Component testing | No equivalent |
 
